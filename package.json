@@ -1,26 +1,43 @@
 {
   "name": "pi-alibaba-models",
   "version": "1.0.0",
-  "description": "Pi extension adding Alibaba Model Studio Plan and Cloud (DashScope) providers with Qwen thinking support",
-  "author": "Francesco",
+  "description": "The complete Alibaba provider for pi — Plan subscription + Cloud pay-per-token, International + China endpoints, Anthropic + OpenAI shapes, native thinking levels. Qwen 3.6 Max, Qwen 3.6 Plus, DeepSeek V4 Pro, Kimi K2.6, GLM-5, MiniMax M2.5.",
+  "author": "Francesco Frapporti <effedue@gmail.com>",
   "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fornace/pi-alibaba-models.git"
+    "url": "git+https://github.com/Fornace/pi-alibaba-models.git"
   },
-  "homepage": "https://github.com/fornace/pi-alibaba-models#readme",
+  "homepage": "https://github.com/Fornace/pi-alibaba-models#readme",
   "bugs": {
-    "url": "https://github.com/fornace/pi-alibaba-models/issues"
+    "url": "https://github.com/Fornace/pi-alibaba-models/issues"
   },
   "keywords": [
     "pi-package",
     "pi",
     "pi-coding-agent",
     "alibaba",
+    "model-studio",
+    "dashscope",
     "qwen",
-    "dashscope"
+    "qwen3",
+    "deepseek",
+    "kimi",
+    "glm",
+    "minimax",
+    "anthropic",
+    "openai",
+    "ai",
+    "llm",
+    "reasoning",
+    "thinking",
+    "vision"
   ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
   "files": [
     "extensions/**/*.ts",
     "README.md",
@@ -29,7 +46,8 @@
   "pi": {
     "extensions": [
       "extensions/alibaba.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/Fornace/pi-alibaba-models/main/screenshot.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
