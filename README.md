@@ -24,15 +24,19 @@ The complete [`pi`](https://github.com/badlogic/pi-mono) extension for Alibaba's
 
 ## Install
 
-This package is a local pi-package. Install via either:
-
 ```bash
-# from a local checkout
-pi install /Users/francesco/alibaba-pi-package
+# recommended
+pi install pi-alibaba-models
 
-# or pack and install globally
-cd /Users/francesco/alibaba-pi-package && npm pack
-pi install /Users/francesco/alibaba-pi-package/pi-alibaba-models-*.tgz
+# explicit npm form (fallback if the bare name doesn't resolve)
+pi install npm:pi-alibaba-models
+
+# or from GitHub
+pi install git:github.com/Fornace/pi-alibaba-models
+
+# or from a local checkout (development)
+git clone https://github.com/Fornace/pi-alibaba-models
+cd pi-alibaba-models && pi install .
 ```
 
 After install, restart `pi`. The extension registers two providers and a slash command on every boot.
@@ -43,7 +47,7 @@ After install, restart `pi`. The extension registers two providers and a slash c
 
 ```text
 1. /alibaba  →  "Reset all"      (wipes config, both auth entries, plan-models cache, alibaba-* enabledModels)
-2. pi remove /Users/francesco/alibaba-pi-package
+2. pi remove pi-alibaba-models
 ```
 
 If you've already run `pi remove` and want to clean leftovers manually:
@@ -132,7 +136,7 @@ Cached at `~/.pi/agent/alibaba-plan-models.cache.json` for **48 hours**. On stal
 - **`sk-sp-` accidentally pasted into the Cloud slot** → run `/alibaba → Re-login Cloud`, then `/login → Alibaba Model Studio Coding Plan` and paste it there. (The login validators will also catch this and offer to redirect you.)
 - **DeepSeek hangs / times out** → make sure you're on the latest version of this extension; it forces DeepSeek to OpenAI-compat. If you customised plan endpoints, verify the OpenAI URL ends in `/compatible-mode/v1`.
 - **Plan picker shows models that 404 at request time** → your subscription tier may not include every advertised model. The picker shows whatever upstream advertises; the API tells you "model_not_found" only when you actually call it.
-- **`/alibaba` command doesn't appear** → `pi list` should show `../../alibaba-pi-package` (or wherever you installed it) under "User packages". If absent, run `pi install <path>` again.
+- **`/alibaba` command doesn't appear** → `pi list` should show `pi-alibaba-models` (or whatever source you installed from) under "User packages". If absent, run `pi install pi-alibaba-models` again and restart `pi`.
 
 ## Files
 

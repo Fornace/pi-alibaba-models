@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.2
+
+- Fix README install instructions: replaced hardcoded local path (`/Users/francesco/alibaba-pi-package`) with `pi install pi-alibaba-models` everywhere (Install, Uninstall, Troubleshooting). npm and git fallbacks documented.
+
+## 1.0.1
+
+- Pre-release polish: fix LICENSE author, fix import scope, expand README, sync model lineup (Qwen 3.6 Max, DeepSeek V4 Pro), gitignore `package-lock.json`
+- Use Supabase CDN for directory banner
+
 ## 1.0.0
 
 - Initial release
