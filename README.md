@@ -1,6 +1,26 @@
 # pi-alibaba-models
 
-A [`pi`](https://github.com/badlogic/pi-mono) extension that adds two Alibaba providers — Model Studio Coding Plan and Alibaba Cloud (DashScope) — plus an `/alibaba` slash-command for runtime configuration.
+The complete [`pi`](https://github.com/badlogic/pi-mono) extension for Alibaba's model lineup — **Qwen 3.6 Max**, **Qwen 3.6 Plus**, **DeepSeek V4 Pro**, **Kimi K2.6**, **GLM-5**, **MiniMax M2.5**, and the rest of the catalog. Native thinking-level support, both Anthropic- and OpenAI-shaped APIs, both International and China endpoints, both Coding Plan subscriptions and pay-per-token Cloud keys.
+
+## Features
+
+- **Dual Provider Support**: Both the subscription-based Model Studio Coding Plan **and** the pay-per-token Alibaba Cloud (DashScope) — registered side by side, switch per chat from the model picker.
+- **Both API Shapes**: Anthropic-compatible (`/v1/messages`) by default; OpenAI-compatible (`/compatible-mode/v1`) auto-selected for DeepSeek and selectable per-Cloud via `/alibaba`.
+- **Both Regions**: International (`dashscope-intl.aliyuncs.com`, Singapore plan host) and China (`dashscope.aliyuncs.com` + region-specific plan hosts) — switch with `/alibaba`, no re-login needed.
+- **Native Reasoning**: First-class thinking-level support for every reasoning-capable model (Qwen 3.6 Max/Plus, DeepSeek V4, Kimi K2.6, GLM-5, MiniMax M2.5).
+- **Vision Capable**: Image input automatically enabled for VL models and Qwen 3.x Plus variants.
+- **Live Catalog**: Pulls the real `/v1/models` from DashScope on every login + the canonical Qwen-Code plan template. New models appear as Alibaba ships them — no extension update needed.
+
+## How to Use (Quickstart)
+
+1. **Install** the extension (see below).
+2. **Restart** `pi` to load the extension.
+3. Type `/login` in your pi chat input.
+4. Select your provider based on your account type:
+   - Choose **Plans > Alibaba Model Studio Coding Plan** if you have a subscription (your token likely starts with `sk-sp-` or `sk-tok-`).
+   - Choose **Use an API key > Alibaba Cloud (API Key)** if you use the pay-as-you-go DashScope service (your token likely starts with `sk-`).
+5. Paste your token when prompted.
+6. Open the model picker, select a model (e.g., `Qwen 3.6 Max`, `Qwen 3.6 Plus`, or `DeepSeek V4 Pro`), and start chatting!
 
 ## Install
 
@@ -12,7 +32,7 @@ pi install /Users/francesco/alibaba-pi-package
 
 # or pack and install globally
 cd /Users/francesco/alibaba-pi-package && npm pack
-pi install /Users/francesco/alibaba-pi-package/pi-alibaba-models-1.0.0.tgz
+pi install /Users/francesco/alibaba-pi-package/pi-alibaba-models-*.tgz
 ```
 
 After install, restart `pi`. The extension registers two providers and a slash command on every boot.
@@ -82,20 +102,23 @@ The plan model list is fetched from the canonical Qwen Code template:
 
 <https://github.com/QwenLM/qwen-code/blob/main/packages/cli/src/constants/codingPlan.ts>
 
-Cached at `~/.pi/agent/alibaba-plan-models.cache.json` for **24 hours**. On stale cache, the extension re-fetches with a 4 s timeout and falls back silently to a hardcoded list on failure. Force a refresh from `/alibaba → Refresh studio models`.
+Cached at `~/.pi/agent/alibaba-plan-models.cache.json` for **48 hours**. On stale cache, the extension re-fetches with a 4 s timeout and falls back silently to a hardcoded list on failure. Force a refresh from `/alibaba → Refresh model lists`.
 
-`deepseek-v3.2` is merged in even when upstream omits it (the user's plan endpoint serves it as well).
+`deepseek-v3.2` (and any plan-served models the upstream template omits) is merged in via a small allow-list so the picker reflects what the endpoint actually serves. The Cloud provider mirrors the live `/v1/models` response — V4 Pro/Flash, Qwen 3.6 Max/Plus, Kimi K2.6, GLM-5, MiniMax M2.5 etc. all surface automatically as Alibaba ships them.
 
-## DeepSeek note
+## Limitations & Known Issues
 
-Any model id matching `/deepseek/i` is **forced to the OpenAI-completions endpoint** regardless of upstream metadata. The Anthropic-compat path on the plan host hangs / times out for DeepSeek models.
+- **DeepSeek Compatibility**: The Anthropic-compatible path on the Alibaba Plan host often hangs or times out for DeepSeek models. To resolve this seamlessly, this extension automatically forces any model ID containing `deepseek` to use the **OpenAI-completions endpoint** instead.
+- **Model Availability (404s)**: The model picker displays the universally *advertised* catalog. However, if your specific Alibaba Cloud account or Model Studio subscription tier does not include access to a specific model, the API will return a `model_not_found` error only when you actually attempt to send a message.
+- **API Wrapper Quirks**: Alibaba's native Anthropic compatibility layer can occasionally be strict or quirky with complex parallel tool calls. If you experience systemic parsing errors on DashScope, you can use the `/alibaba` command to switch your Cloud API format to "OpenAI".
+- **Dynamic Caching**: Model lists are cached for 48 hours. If a new model drops and you don't see it, run `/alibaba` -> `Refresh model lists`.
 
 ## `/alibaba` command reference
 
 | Choice                       | What it does                                                              |
 |------------------------------|---------------------------------------------------------------------------|
 | Status                       | Print Plan/Cloud login state, active endpoints, model count, cache age   |
-| Refresh studio models        | Force-refetch plan models from upstream and reload the extension         |
+| Refresh model lists          | Force-refetch Plan + Cloud catalogs and reload the extension             |
 | Re-login Plan                | Wipe `alibaba-plan` from `auth.json` and reload (then run `/login`)      |
 | Re-login Cloud               | Wipe `alibaba-cloud` from `auth.json` and reload (then run `/login`)     |
 | Plan — Change Endpoints      | Override OpenAI / Anthropic base URLs                                    |
@@ -117,4 +140,5 @@ Any model id matching `/deepseek/i` is **forced to the OpenAI-completions endpoi
 |-------------------------------------------------------|------------------------------------|
 | `~/.pi/agent/auth.json`                               | Both provider credentials (0600)   |
 | `~/.pi/agent/alibaba-config.json`                     | Endpoint / domain / format config  |
-| `~/.pi/agent/alibaba-plan-models.cache.json`          | 24 h plan-models cache             |
+| `~/.pi/agent/alibaba-plan-models.cache.json`          | 48 h plan-models cache             |
+| `~/.pi/agent/alibaba-cloud-models.cache.json`         | 48 h cloud-models cache            |
