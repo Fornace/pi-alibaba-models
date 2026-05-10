@@ -257,6 +257,13 @@ function buildCloudModels(models: ProviderModelConfig[], domain: string, fmt: st
   });
 }
 
+// ── Module-level mutable model lists ─────────────────────────────────
+// Start with hardcoded for instant picker availability. Updated by lazy
+// session_start fetch so modifyModels (which closes over these) always
+// sees the latest roster without needing to re-register the OAuth hook.
+let planDefs: PlanModelDef[] = [...PLAN_MODEL_DEFS_FALLBACK];
+let cloudDefs: ProviderModelConfig[] = [...CLOUD_FALLBACK];
+
 // ── Migration ─────────────────────────────────────────────────────────
 const isPlanKey = (k: string) => k.startsWith("sk-sp-") || k.startsWith("sk-tok-");
 
@@ -332,21 +339,23 @@ function migrateLegacyAuth() {
 }
 
 // ── Main ──────────────────────────────────────────────────────────────
-export default async function (pi: ExtensionAPI) {
+// Synchronous factory: register hardcoded models instantly so they appear
+// in the picker without any network round-trip. A session_start handler
+// fires later, fetches the live catalogs, and re-registers both providers
+// (full replacement) to augment the list with newly-discovered models.
+export default function (pi: ExtensionAPI) {
   migrateLegacyAuth();
   const config = loadConfig();
-  const planDefs = await fetchPlanModels();
 
   let planKey: string | null = null;
   let cloudKey: string | null = null;
   try {
     const auth = readAuth();
-    // Plan: oauth-shape (access). Cloud: api_key-shape (key).
     planKey = auth["alibaba-plan"]?.access || auth["alibaba-plan"]?.key || null;
     cloudKey = auth["alibaba-cloud"]?.key || auth["alibaba-cloud"]?.access || null;
   } catch {}
 
-  // ── Plan provider (subscription-style; OAuth shape with paste-key) ──
+  // ── Plan provider (instant, hardcoded) ──────────────────────────────
   let planCreds: { access?: string; refresh?: string } | undefined;
   if (planKey) { try { planCreds = readAuth()["alibaba-plan"]; } catch {} }
   const planEndpoints = resolvePlanEndpoints(planCreds);
@@ -385,6 +394,7 @@ export default async function (pi: ExtensionAPI) {
       getApiKey(c) { return c.access; },
       modifyModels(models, credentials) {
         const ep = resolvePlanEndpoints(credentials);
+        // Always reads the LATEST planDefs (hardcoded → session_start updated)
         const updated = buildPlanModels(planDefs, ep.openai, ep.anthropic);
         return models.map((m) => {
           if (m.provider !== "alibaba-plan") return m;
@@ -396,31 +406,95 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
-  // ── Cloud provider (per-token API key) ──────────────────────────────
-  let cloudModels = [...CLOUD_FALLBACK];
+  // ── Cloud provider (instant, hardcoded) ────────────────────────────
   const cloudDomain = config.cloudDomain || DEFAULT_CLOUD_DOMAIN;
   const cloudFmt = config.cloudApiFormat || "anthropic-messages";
-  if (cloudKey) {
-    try { cloudModels = await fetchCloudModels(cloudDomain, cloudKey); } catch {}
-  }
 
-  // Registered as an API-key provider (no `oauth` block) so /login routes it
-  // under "Use an API key" via pi's discriminator (interactive-mode.js:97-105
-  // — !oauthProviderIds.has("alibaba-cloud") returns true).
-  // pi's API-key login path saves {type:"api_key", key:<input>} directly; there
-  // is no extension hook to validate the input or pre-fill a custom prompt.
-  // A Plan token misrouted here is detected on the next launch via
-  // migrateLegacyAuth() and moved to alibaba-plan.
   pi.registerProvider("alibaba-cloud", {
     name: "Alibaba Cloud (API Key)",
     baseUrl: `https://${cloudDomain}/apps/anthropic`,
-    // Env var fallback (matches pi's built-in API-key providers). When unset
-    // and no /login key, pi sends the literal string and the server returns
-    // a 403 — same behavior as built-in providers like deepseek/groq/etc.
     apiKey: "DASHSCOPE_API_KEY",
     api: "anthropic-messages",
     authHeader: true,
-    models: buildCloudModels(cloudModels, cloudDomain, cloudFmt),
+    models: buildCloudModels(cloudDefs, cloudDomain, cloudFmt),
+  });
+
+  // ── Lazy refresh: fetch live catalogs and re-register ───────────────
+  pi.on("session_start", async () => {
+    try {
+      planDefs = await fetchPlanModels();
+    } catch {}
+
+    try {
+      const auth = readAuth();
+      const key = auth["alibaba-cloud"]?.key || auth["alibaba-cloud"]?.access;
+      if (key) {
+        const cfg = loadConfig();
+        const domain = cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN;
+        cloudDefs = await fetchCloudModels(domain, key);
+      }
+    } catch {}
+
+    // Re-register both providers with the expanded model lists
+    const currentConfig = loadConfig();
+    const currentPlanCreds = readAuth()["alibaba-plan"];
+    const ep = resolvePlanEndpoints(currentPlanCreds);
+    const currentDomain = currentConfig.cloudDomain || DEFAULT_CLOUD_DOMAIN;
+    const currentFmt = currentConfig.cloudApiFormat || "anthropic-messages";
+
+    pi.registerProvider("alibaba-plan", {
+      name: "Alibaba Model Studio Plan",
+      baseUrl: ep.anthropic,
+      api: "anthropic-messages",
+      authHeader: true,
+      models: buildPlanModels(planDefs, ep.openai, ep.anthropic),
+      oauth: {
+        name: "Alibaba Model Studio Coding Plan",
+        async login(callbacks) {
+          const key = await callbacks.onPrompt({
+            message: "Coding Plan token (sk-sp-… or sk-tok-…). Run /alibaba afterwards if you need a non-Singapore region:",
+          });
+          if (!isPlanKey(key)) {
+            throw new Error(
+              "This doesn't look like a Coding Plan token (expected sk-sp-… or sk-tok-…). " +
+              "If it's a Cloud API key, run /login → 'Alibaba Cloud (API Key)' instead.",
+            );
+          }
+          const cfg = loadConfig();
+          const openaiUrl = cfg.planOpenAI || DEFAULT_PLAN_OPENAI;
+          const anthropicUrl = cfg.planAnthropic || DEFAULT_PLAN_ANTHROPIC;
+          cfg.planOpenAI = openaiUrl;
+          cfg.planAnthropic = anthropicUrl;
+          saveConfig(cfg);
+          return {
+            access: key,
+            refresh: JSON.stringify({ openai: openaiUrl, anthropic: anthropicUrl }),
+            expires: Date.now() + 365 * 86400_000,
+          };
+        },
+        async refreshToken(c) { return c; },
+        getApiKey(c) { return c.access; },
+        modifyModels(models, credentials) {
+          const ep2 = resolvePlanEndpoints(credentials);
+          const updated = buildPlanModels(planDefs, ep2.openai, ep2.anthropic);
+          return models.map((m) => {
+            if (m.provider !== "alibaba-plan") return m;
+            const found = updated.find((u) => u.id === m.id);
+            if (!found || !found.api) return m;
+            return { ...m, baseUrl: found.baseUrl ?? m.baseUrl, api: found.api };
+          });
+        },
+      },
+    });
+
+    pi.registerProvider("alibaba-cloud", {
+      name: "Alibaba Cloud (API Key)",
+      baseUrl: `https://${currentDomain}/apps/anthropic`,
+      apiKey: "DASHSCOPE_API_KEY",
+      api: "anthropic-messages",
+      authHeader: true,
+      models: buildCloudModels(cloudDefs, currentDomain, currentFmt),
+    });
   });
 
   // ── Command: /alibaba ──────────────────────────────────────────────
@@ -451,16 +525,19 @@ export default async function (pi: ExtensionAPI) {
         const ageMin = (c: { fetchedAt: number } | null) => c ? Math.round((Date.now() - c.fetchedAt) / 60000) : null;
         const planAge = ageMin(planCache);
         const cloudAge = ageMin(cloudCache);
+        // "hardcoded" means session_start hasn't fetched live yet (or fetch failed)
+        const isPlanLive = planCache && planAge !== null && planCache.models.length === planDefs.length;
+        const isCloudLive = cloudCache && cloudAge !== null && cloudCache.models.length === cloudDefs.length;
         const lines = [
           `Plan:  ${planCred ? "logged in" : "not logged in"}`,
           `       Anthropic: ${ep.anthropic}`,
           `       OpenAI:    ${ep.openai}`,
-          `       Models:    ${planDefs.length} (cache ${planAge === null ? "absent" : `${planAge}m old, TTL 48h`})`,
+          `       Models:    ${planDefs.length} (${isPlanLive ? `live, ${planAge}m old` : "hardcoded"}${planAge !== null && !isPlanLive ? `, cache ${planAge}m old` : ""})`,
           ``,
           `Cloud: ${cloudCred ? "logged in" : "not logged in"}`,
           `       Domain:    ${cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN}`,
           `       Format:    ${cfg.cloudApiFormat || "anthropic-messages"}`,
-          `       Models:    ${cloudModels.length} (cache ${cloudAge === null ? "absent" : `${cloudAge}m old, TTL 48h`})`,
+          `       Models:    ${cloudDefs.length} (${isCloudLive ? `live, ${cloudAge}m old` : "hardcoded"})`,
         ].join("\n");
         ctx.ui.notify(lines, "info");
         return;
@@ -468,15 +545,15 @@ export default async function (pi: ExtensionAPI) {
 
       if (choice === "Refresh model lists") {
         try {
-          const planFresh = await fetchPlanModels(true);
+          planDefs = await fetchPlanModels(true);
           let cloudCount = 0;
           if (cloudCred?.key || cloudCred?.access) {
             const domain = cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN;
             const key = cloudCred.key || cloudCred.access;
-            const fresh = await fetchCloudModels(domain, key, true);
-            cloudCount = fresh.length;
+            cloudDefs = await fetchCloudModels(domain, key, true);
+            cloudCount = cloudDefs.length;
           }
-          ctx.ui.notify(`Plan: ${planFresh.length} models. Cloud: ${cloudCount > 0 ? `${cloudCount} models` : "skipped (not logged in)"}.`, "info");
+          ctx.ui.notify(`Plan: ${planDefs.length} models. Cloud: ${cloudCount > 0 ? `${cloudCount} models` : "skipped (not logged in)"}.`, "info");
           await ctx.reload();
         } catch (e: any) {
           ctx.ui.notify(`Failed: ${e?.message || e}`, "error");
