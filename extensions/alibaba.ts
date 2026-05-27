@@ -188,6 +188,18 @@ function buildCloudModels(models: ProviderModelConfig[], domain: string, fmt: st
   });
 }
 
+// ── Fallback Cloud models ────────────────────────────────────────────
+// When no credentials are available (or the live fetch fails with no cache),
+// we still register these models so the provider appears in /login under
+// "Use an API key". Once the user logs in, the live catalog replaces them.
+const FALLBACK_CLOUD_MODELS: ProviderModelConfig[] = [
+  { id: "qwen-max", name: "Qwen Max", reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 131072, maxTokens: 8192, compat: { thinkingFormat: "qwen" } },
+  { id: "qwen-plus", name: "Qwen Plus", reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 131072, maxTokens: 8192, compat: { thinkingFormat: "qwen" } },
+  { id: "qwen-turbo", name: "Qwen Turbo", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 131072, maxTokens: 8192 },
+  { id: "deepseek-v3", name: "DeepSeek V3", reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 131072, maxTokens: 8192, compat: { thinkingFormat: "qwen" } },
+  { id: "deepseek-r1", name: "DeepSeek R1", reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 131072, maxTokens: 8192, compat: { thinkingFormat: "qwen" } },
+];
+
 // ── Offline-resilient catalog loaders ────────────────────────────────
 // Live API is the source of truth. But a network failure must never take
 // the whole extension (and therefore pi, and the user's local models) down
@@ -264,27 +276,27 @@ function migrateLegacyAuth() {
       }
     }
 
-    // 2) Cloud was previously registered with `oauth` block — credentials were
-    //    saved as {type:"oauth", access:"sk-..."}. Now that cloud is api-key-only,
-    //    pi can't read those credentials. Migrate them in place.
+    // 2) Cloud supports both api_key and oauth formats. Only migrate if the
+    //    entry is in an unknown format or contains a misrouted Plan token.
     const cloud = auth["alibaba-cloud"];
-    if (cloud && cloud.type !== "api_key") {
+    if (cloud) {
       const key = extractKey(cloud);
-      if (key) {
-        // Defensive: if the cloud slot somehow contains a Plan token, route it.
-        if (isPlanKey(key)) {
-          auth["alibaba-plan"] = auth["alibaba-plan"] ?? {
-            type: "oauth", access: key, refresh: "", expires: Date.now() + 365 * 86400_000,
-          };
-          delete auth["alibaba-cloud"];
-        } else {
-          auth["alibaba-cloud"] = { type: "api_key", key };
-        }
-        dirty = true;
-      } else {
+      if (!key) {
         delete auth["alibaba-cloud"];
         dirty = true;
+      } else if (isPlanKey(key)) {
+        // Plan key in cloud slot → move to plan
+        auth["alibaba-plan"] = auth["alibaba-plan"] ?? {
+          type: "oauth", access: key, refresh: "", expires: Date.now() + 365 * 86400_000,
+        };
+        delete auth["alibaba-cloud"];
+        dirty = true;
+      } else if (cloud.type !== "api_key" && cloud.type !== "oauth") {
+        // Unknown format → normalize to api_key
+        auth["alibaba-cloud"] = { type: "api_key", key };
+        dirty = true;
       }
+      // else: valid api_key or oauth with non-plan key → leave as is
     }
 
     // 3) Defensive: a misrouted Plan token sitting in alibaba-cloud (api_key shape).
@@ -329,6 +341,10 @@ export default async function (pi: ExtensionAPI) {
 
   if (planCreds?.access) planDefs = await loadPlanDefs(true, planCreds);
   if (cloudKey) cloudDefs = await loadCloudDefs(cloudDomain, cloudKey, true);
+  // Always ensure Cloud has models so the provider is visible in /login
+  // under "Use an API key". Fallback models are replaced by live catalog on login.
+  if (!cloudDefs.length) cloudDefs = FALLBACK_CLOUD_MODELS;
+
 
   // ── Plan provider ───────────────────────────────────────────────────
   pi.registerProvider("alibaba-plan", {
@@ -387,9 +403,37 @@ export default async function (pi: ExtensionAPI) {
     models: buildCloudModels(cloudDefs, cloudDomain, cloudFmt),
   });
 
+
+
   // ── Lazy refresh: fetch live catalogs and re-register ───────────────
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
    try {
+    // ── Logout hook: clear Cloud models when credential is removed ─────
+    // pi's /logout calls authStorage.remove() then modelRegistry.refresh(),
+    // but refresh() only reloads base models from disk — extension-registered
+    // models persist in memory. Hook remove() to re-register with 0 models,
+    // making Cloud models disappear from the picker on logout.
+    // After logout, /reload restores the provider for re-login.
+    if (ctx?.modelRegistry?.authStorage && !(ctx.modelRegistry.authStorage as any).__alibabaHooked) {
+      const originalRemove = ctx.modelRegistry.authStorage.remove.bind(ctx.modelRegistry.authStorage);
+      ctx.modelRegistry.authStorage.remove = (provider: string) => {
+        originalRemove(provider);
+        if (provider === "alibaba-cloud") {
+          cloudDefs = [];
+          pi.registerProvider("alibaba-cloud", {
+            name: "Alibaba Cloud (API Key)",
+            baseUrl: `https://${loadConfig().cloudDomain || DEFAULT_CLOUD_DOMAIN}/apps/anthropic`,
+            apiKey: "DASHSCOPE_API_KEY",
+            api: "anthropic-messages",
+            authHeader: true,
+            models: [],
+          });
+        }
+      };
+      (ctx.modelRegistry.authStorage as any).__alibabaHooked = true;
+    }
+
+
     const planCred = readAuth()["alibaba-plan"];
     planDefs = await loadPlanDefs(false, planCred);
 
@@ -461,6 +505,7 @@ export default async function (pi: ExtensionAPI) {
       authHeader: true,
       models: buildCloudModels(cloudDefs, currentDomain, currentFmt),
     });
+
    } catch (e: any) {
     console.warn(`[alibaba] session_start catalog refresh failed (${e?.message || e}); keeping previously loaded models.`);
    }
