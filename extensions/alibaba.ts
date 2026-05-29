@@ -51,7 +51,7 @@ function inferPlanDef(id: string): PlanModelDef {
   const openaiOnly = /deepseek/i.test(id);
   const isVision = /vl|vision/i.test(id) || /^qwen3\.\d+-plus$/i.test(id) || /kimi/i.test(id);
   const isReasoning = /max|kimi|glm|minimax|deepseek|3\.6|3\.5|3\.7/i.test(id);
-  const ctxMatch = /flash/i.test(id) ? 131072 : /kimi/i.test(id) ? 262144 : 131072;
+  const ctxMatch = /flash/i.test(id) ? 131072 : /kimi/i.test(id) ? 262144 : /^qwen3\.6-plus$/i.test(id) ? 1048576 : 131072;
   return {
     id,
     name: prettyName(id),
@@ -159,13 +159,14 @@ async function fetchCloudModels(domain: string, apiKey: string, _force = false):
       .map((m) => {
         const isVision = /vl|vision/i.test(m.id);
         const isReasoning = /qwq|max|thinking|deepseek|minimax|kimi|glm|3\.6|3\.5/i.test(m.id);
+        const contextWindow = /^qwen3\.6-plus$/i.test(m.id) ? 1048576 : 128000;
         return {
           id: m.id,
           name: m.name || m.id,
           reasoning: isReasoning,
           input: isVision ? (["text", "image"] as ("text" | "image")[]) : (["text"] as ("text" | "image")[]),
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: 128000,
+          contextWindow,
           maxTokens: 8192,
           compat: isReasoning ? { thinkingFormat: "qwen" as const } : undefined,
         };
