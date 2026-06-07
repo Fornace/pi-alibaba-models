@@ -382,7 +382,7 @@ export default async function (pi: ExtensionAPI) {
   pi.registerProvider("alibaba-cloud", {
     name: "Alibaba Cloud (API Key)",
     baseUrl: `https://${cloudDomain}/apps/anthropic`,
-    apiKey: "DASHSCOPE_API_KEY",
+    apiKey: "$DASHSCOPE_API_KEY",
     api: "anthropic-messages",
     authHeader: true,
     models: buildCloudModels(cloudDefs, cloudDomain, cloudFmt),
@@ -457,7 +457,7 @@ export default async function (pi: ExtensionAPI) {
     pi.registerProvider("alibaba-cloud", {
       name: "Alibaba Cloud (API Key)",
       baseUrl: `https://${currentDomain}/apps/anthropic`,
-      apiKey: "DASHSCOPE_API_KEY",
+      apiKey: "$DASHSCOPE_API_KEY",
       api: "anthropic-messages",
       authHeader: true,
       models: buildCloudModels(cloudDefs, currentDomain, currentFmt),

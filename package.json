@@ -1,6 +1,6 @@
 {
   "name": "pi-alibaba-models",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "The complete Alibaba provider for pi — Plan subscription + Cloud pay-per-token, International + China endpoints, Anthropic + OpenAI shapes, native thinking levels. Qwen 3.6 Max, Qwen 3.6 Plus, DeepSeek V4 Pro, Kimi K2.6, GLM-5, MiniMax M2.5.",
   "author": "Francesco Frapporti <effedue@gmail.com>",
   "license": "MIT",
