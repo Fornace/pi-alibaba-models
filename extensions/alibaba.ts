@@ -55,9 +55,7 @@ interface PlanCache { fetchedAt: number; source: string; models: PlanModelDef[];
 // The /models API only returns ids/names, not capabilities — so context
 // window, reasoning, and vision are inferred from the id. Both the Plan
 // and Cloud code paths route through these helpers so they never drift
-// apart. Context windows reflect Alibaba's published specs as of June 2026
-// (https://www.alibabacloud.com/help/en/model-studio/models + per-model docs)
-// and are corrected here as new models ship.
+// apart. Context windows are corrected here as new models ship.
 const isVisionModel = (id: string): boolean =>
   /vl|vision/i.test(id) || /^qwen3\.\d+-plus\b/i.test(id) || /kimi/i.test(id);
 
