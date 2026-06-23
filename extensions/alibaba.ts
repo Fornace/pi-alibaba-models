@@ -281,7 +281,12 @@ async function loadPlanDefs(force: boolean, credentials?: { access?: string; ref
     const cache = readJSON<PlanCache | null>(PLAN_CACHE_PATH, null);
     if (cache?.models?.length) {
       console.warn(`[alibaba] Plan catalog fetch failed (${e?.message || e}); using cached models (${cache.models.length}, ${cacheAgeMin(cache.fetchedAt)}m old).`);
-      return cache.models;
+      // 重新计算 context window 以应用最新的 inferContextWindow 逻辑
+      const overrides = loadConfig().contextWindowOverrides;
+      return cache.models.map(m => ({
+        ...m,
+        contextWindow: inferContextWindow(m.id, overrides),
+      }));
     }
     console.warn(`[alibaba] Plan catalog fetch failed (${e?.message || e}); no cache — Plan models unavailable until reconnected. Other providers still work.`);
     return [];
@@ -295,7 +300,12 @@ async function loadCloudDefs(domain: string, apiKey: string, force: boolean): Pr
     const cache = readJSON<CloudCache | null>(CLOUD_CACHE_PATH, null);
     if (cache?.models?.length && cache.domain === domain) {
       console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); using cached models (${cache.models.length}, ${cacheAgeMin(cache.fetchedAt)}m old).`);
-      return cache.models;
+      // 重新计算 context window 以应用最新的 inferContextWindow 逻辑
+      const overrides = loadConfig().contextWindowOverrides;
+      return cache.models.map(m => ({
+        ...m,
+        contextWindow: inferContextWindow(m.id, overrides),
+      }));
     }
     console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); no cache — Cloud models unavailable until reconnected. Other providers still work.`);
     return [];
