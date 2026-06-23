@@ -62,65 +62,27 @@ const isVisionModel = (id: string): boolean =>
 const isReasoningModel = (id: string): boolean =>
   /qwq|max|thinking|deepseek|minimax|kimi|glm|3\.[5-9]/i.test(id);
 
-// Infer the published context window (in tokens) from a model id. Order
-// matters: the most specific families are matched first.
-//
-// Sources (June 2026):
-// - Model list (all models with context windows):
-//   https://www.alibabacloud.com/help/en/model-studio/models
-// - GLM models (incl. GLM-5.2):
-//   https://www.alibabacloud.com/help/en/model-studio/glm
-//
-// A contextWindowOverrides entry (exact id, or "*" catch-all) always wins.
+// Infer context window (tokens) from model id. Sources:
+// alibabacloud.com/help/en/model-studio/models + /glm
 const inferContextWindow = (id: string, overrides?: Record<string, number>): number => {
-  // User overrides win: exact id first, then the "*" catch-all.
   const o = overrides?.[id] ?? overrides?.["*"];
   if (typeof o === "number" && o > 0) return o;
 
-  // ── Third-party models hosted on Model Studio ─────────────────────
-  // GLM-5.2 ships a 1M context; earlier GLM models (5.1, 5, 4.x) are 198K (202,752).
+  // Third-party models
   if (/^glm-?5\.2\b/i.test(id)) return 1048576;
   if (/^glm/i.test(id)) return 202752;
-  // DeepSeek V4 (pro/flash) = 1M; V3.x / r1 family = 128K.
   if (/deepseek-?v4/i.test(id)) return 1048576;
   if (/^deepseek/i.test(id)) return 131072;
-  // Kimi K2 family = 256K.
   if (/kimi/i.test(id)) return 262144;
-  // MiniMax-M2.5 = 192K (196,608), MiniMax-M2.1 = 200K (204,800).
   if (/minimax-?m2\.5/i.test(id)) return 196608;
   if (/minimax-?m2\.1/i.test(id)) return 204800;
   if (/minimax/i.test(id)) return 196608;
 
-  // ── Qwen family ───────────────────────────────────────────────────
-  // Edge cases with unusual context sizes.
-  if (/qwen-long/i.test(id)) return 10485760;   // 10M
-  if (/qwen-mt/i.test(id)) return 16384;          // 16K
-  if (/qwen-omni/i.test(id)) return 32768;        // 32K
-  if (/character/i.test(id)) return /flash/i.test(id) ? 8192 : 32768;
-
-  // Qwen2.5 open models all = 1M.
-  if (/qwen2\.5/i.test(id)) return 1048576;
-
-  // Qwen3-Coder: plus/flash = 1M, others (next/*-instruct) = 256K.
-  if (/qwen3-coder/i.test(id)) return /(plus|flash)\b/i.test(id) ? 1048576 : 262144;
-
-  // Qwen3.7+: the whole series (plus / max / flash) ships a 1M context window.
+  // Qwen 3.7+: all 1M. Qwen 3.5/3.6: plus/flash = 1M, max/open-weight = 256K.
   if (/^qwen3\.([7-9]|\d{2,})\b/i.test(id)) return 1048576;
-
-  // Qwen3.5 / 3.6: plus & flash = 1M; max-preview & open-weight (NNb) = 256K.
   if (/^qwen3\.[56]\b/i.test(id)) return /(plus|flash)/i.test(id) ? 1048576 : 262144;
 
-  // Legacy Qwen3 (qwen3-max, qwen3-235b, qwen3-32b, …) = 256K.
-  if (/^qwen3-/i.test(id)) return 262144;
-
-  // Legacy reasoning models.
-  if (/^qwq/i.test(id) || /^qvq/i.test(id)) return 131072;
-
-  // Legacy aliases: qwen-plus/flash/turbo = 1M, qwen-max = 128K.
-  if (/^qwen-(plus|flash|turbo)\b/i.test(id)) return 1048576;
-  if (/^qwen-max\b/i.test(id)) return 131072;
-
-  return 131072; // safe default: 128K
+  return 131072;
 };
 
 // Heuristic: turn a bare model id (from /v1/models API) into a full PlanModelDef.
@@ -298,7 +260,7 @@ const CLOUD_LOGIN_SEED: ProviderModelConfig[] = [{
   reasoning: false,
   input: ["text"],
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 1048576,
+  contextWindow: 131072,
   maxTokens: 8192,
 }];
 
