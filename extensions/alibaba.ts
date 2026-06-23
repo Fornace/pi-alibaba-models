@@ -63,7 +63,8 @@ const isReasoningModel = (id: string): boolean =>
   /qwq|max|thinking|deepseek|minimax|kimi|glm|3\.[5-9]/i.test(id);
 
 // Infer context window (tokens) from model id. Sources:
-// alibabacloud.com/help/en/model-studio/models + /glm
+// https://www.alibabacloud.com/help/en/model-studio/models
+// https://www.alibabacloud.com/help/en/model-studio/glm
 const inferContextWindow = (id: string, overrides?: Record<string, number>): number => {
   const o = overrides?.[id] ?? overrides?.["*"];
   if (typeof o === "number" && o > 0) return o;
