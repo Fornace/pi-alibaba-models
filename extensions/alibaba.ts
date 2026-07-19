@@ -4,7 +4,31 @@ import os from "node:os";
 import path from "node:path";
 
 // ── Paths ─────────────────────────────────────────────────────────────
-const HOME_DIR = path.join(os.homedir(), ".pi", "agent");
+// Resolve the host's agent directory the same way pi / oh-my-pi do, so the
+// extension works under both (~/.pi/agent vs ~/.omp/agent):
+//   1. PI_CODING_AGENT_DIR — full override for the agent dir.
+//   2. PI_CONFIG_DIR       — config-root dirname under home.
+//   3. host detection      — oh-my-pi identifies itself via process name
+//      (execPath/argv0/title are "omp"; verified empirically — omp does NOT
+//      export OMPCODE into its own process env, that var only leaks into
+//      shells omp spawns, so it is kept as a secondary signal only).
+//   4. fallback            — ~/.pi (classic pi).
+// Named profiles (OMP_PROFILE / PI_PROFILE) relocate the base to
+// <config-root>/profiles/<name>/agent, mirroring omp's own resolution.
+function isOmpHost(): boolean {
+  const exe = path.basename(process.execPath || "");
+  if (/^omp(\.exe)?$/i.test(exe)) return true;
+  if (process.argv0 === "omp" || process.title === "omp") return true;
+  return !!process.env.OMPCODE;
+}
+function resolveAgentDir(): string {
+  if (process.env.PI_CODING_AGENT_DIR) return process.env.PI_CODING_AGENT_DIR;
+  const root = process.env.PI_CONFIG_DIR || (isOmpHost() ? ".omp" : ".pi");
+  const profile = process.env.OMP_PROFILE || process.env.PI_PROFILE;
+  if (profile) return path.join(os.homedir(), root, "profiles", profile, "agent");
+  return path.join(os.homedir(), root, "agent");
+}
+const HOME_DIR = resolveAgentDir();
 const CONFIG_PATH = path.join(HOME_DIR, "alibaba-config.json");
 const AUTH_PATH = path.join(HOME_DIR, "auth.json");
 const PLAN_CACHE_PATH = path.join(HOME_DIR, "alibaba-plan-models.cache.json");
@@ -40,6 +64,107 @@ const loadConfig = (): AlibabaConfig => readJSON<AlibabaConfig>(CONFIG_PATH, {})
 const saveConfig = (c: AlibabaConfig) => writeJSON(CONFIG_PATH, c);
 const readAuth = (): Record<string, any> => readJSON<Record<string, any>>(AUTH_PATH, {});
 const writeAuth = (a: Record<string, any>) => writeJSON(AUTH_PATH, a);
+
+// ── Host credential access ────────────────────────────────────────────
+// pi persists provider credentials in <agent dir>/auth.json; oh-my-pi keeps
+// the same credential objects in agent.db behind its AuthStorage API. The
+// runtime registry (available on session_start and command ctxs) is the only
+// path that works under both, so prefer it and fall back to the auth.json
+// file (pi's pre-session factory path, older pi releases). The authStorage
+// surface also differs between hosts (pi: get/set/remove; omp:
+// getOAuthCredential/getApiKey/hasAuth/remove), so access is feature-detected.
+interface AnyCred { type?: string; access?: string; key?: string; refresh?: string; expires?: number; }
+
+// Structural view over the hosts' divergent authStorage APIs (pi:
+// get/set/remove; oh-my-pi: getOAuthCredential/getApiKey/hasAuth/remove).
+// Each method is feature-detected before use.
+interface AuthStorageLike {
+  get?: (provider: string) => unknown;
+  getOAuthCredential?: (provider: string) => unknown;
+  getApiKey?: (provider: string) => unknown;
+  remove?: (provider: string) => void;
+  set?: (provider: string, cred: AnyCred) => void;
+}
+
+function authStorageOf(registry: unknown): AuthStorageLike | null {
+  if (!registry || typeof registry !== "object" || !("authStorage" in registry)) return null;
+  const s = registry.authStorage;
+  if (!s || typeof s !== "object") return null;
+  // Unchecked cast: the concrete type is host-dependent and not expressible
+  // as one shared type — every method above is probed with typeof before use.
+  return s as AuthStorageLike;
+}
+
+function strField(o: unknown, ...names: string[]): string | undefined {
+  if (!o || typeof o !== "object") return undefined;
+  const rec = o as Record<string, unknown>; // narrowed by `in` per key below
+  for (const n of names) {
+    if (n in rec) {
+      const v = rec[n];
+      if (typeof v === "string" && v) return v;
+    }
+  }
+  return undefined;
+}
+
+// Normalize a host credential object of unknown provenance into AnyCred.
+function normalizeCred(c: unknown, type: string): AnyCred | null {
+  if (!c || typeof c !== "object") return null;
+  const access = strField(c, "access", "accessToken", "token");
+  const key = strField(c, "key", "apiKey") ?? access;
+  const refresh = strField(c, "refresh", "refreshToken");
+  if (!access && !key) return null;
+  return { type, access, key, refresh };
+}
+
+function credFromRegistry(registry: unknown, provider: string): AnyCred | null {
+  const as = authStorageOf(registry);
+  if (!as) return null;
+  try {
+    // pi shape.
+    if (as.get) { const c = normalizeCred(as.get(provider), "oauth"); if (c) return c; }
+    // oh-my-pi shapes.
+    if (as.getOAuthCredential) { const c = normalizeCred(as.getOAuthCredential(provider), "oauth"); if (c) return c; }
+    if (as.getApiKey) {
+      const raw = as.getApiKey(provider);
+      if (typeof raw === "string") return { type: "api_key", key: raw };
+      const c = normalizeCred(raw, "api_key");
+      if (c) return c;
+    }
+  } catch {}
+  return null;
+}
+
+function removeCred(registry: unknown, provider: string): void {
+  const as = authStorageOf(registry);
+  try { if (as?.remove) { as.remove(provider); return; } } catch {}
+  const auth = readAuth();
+  if (provider in auth) { delete auth[provider]; writeAuth(auth); }
+}
+
+function setCred(registry: unknown, provider: string, cred: AnyCred): void {
+  const as = authStorageOf(registry);
+  try { if (as?.set) { as.set(provider, cred); return; } } catch {}
+  const auth = readAuth(); auth[provider] = cred; writeAuth(auth);
+}
+
+// Stored auth.json credential, validated to be an object (file is untrusted input).
+function fileCred(provider: string): AnyCred | null {
+  const c: unknown = readAuth()[provider];
+  return c && typeof c === "object" ? c as AnyCred : null;
+}
+
+// Extract ctx.modelRegistry without asserting a host-specific ctx shape.
+function modelRegistryOf(ctx: unknown): unknown {
+  if (ctx && typeof ctx === "object" && "modelRegistry" in ctx) return ctx.modelRegistry;
+  return undefined;
+}
+
+// Runtime registry first (works under oh-my-pi), auth.json fallback (pi).
+const planCredFrom = (registry?: unknown): AnyCred | null =>
+  credFromRegistry(registry, "alibaba-plan") ?? fileCred("alibaba-plan");
+const cloudKeyFrom = (registry?: unknown): string | null =>
+  credFromRegistry(registry, "alibaba-cloud")?.key ?? readCloudKey();
 
 // ── Plan model definitions ────────────────────────────────────────────
 // Anthropic-compatible by default; deepseek forced to openai-completions.
@@ -265,6 +390,15 @@ const CLOUD_LOGIN_SEED: ProviderModelConfig[] = [{
   maxTokens: 8192,
 }];
 
+// ── Plan login seed ──────────────────────────────────────────────────
+// Same zero-model visibility problem as Cloud (issue #1), but sharper under
+// oh-my-pi: credentials only become visible at session_start (they live in
+// agent.db, not auth.json), so the factory-time catalog is empty on every
+// cold start — without a seed the Plan provider would vanish from /login and
+// could never be logged into. One real plan-served id, replaced by the live
+// catalog the moment a token is present.
+const PLAN_LOGIN_SEED: PlanModelDef[] = [inferPlanDef("qwen3.7-plus")];
+
 // ── Offline-resilient catalog loaders ────────────────────────────────
 // Live API is the source of truth. But a network failure must never take
 // the whole extension (and therefore pi, and the user's local models) down
@@ -291,6 +425,26 @@ async function loadPlanDefs(force: boolean, credentials?: { access?: string; ref
     console.warn(`[alibaba] Plan catalog fetch failed (${e?.message || e}); no cache — Plan models unavailable until reconnected. Other providers still work.`);
     return [];
   }
+}
+
+// Seed catalogs from the last-known-good cache when no credential is readable
+// yet (the oh-my-pi factory path: credentials live in agent.db, unreachable
+// pre-session). The live fetch at session_start replaces this; it exists so
+// the first provider registration already carries the real catalog instead of
+// the login seed — under omp a duplicate-name re-registration does not
+// reliably replace the first one.
+function cachedPlanDefs(): PlanModelDef[] {
+  const cache = readJSON<PlanCache | null>(PLAN_CACHE_PATH, null);
+  if (!cache?.models?.length) return [];
+  const overrides = loadConfig().contextWindowOverrides;
+  return cache.models.map(m => ({ ...m, contextWindow: inferContextWindow(m.id, overrides) }));
+}
+
+function cachedCloudDefs(domain: string): ProviderModelConfig[] {
+  const cache = readJSON<CloudCache | null>(CLOUD_CACHE_PATH, null);
+  if (!cache?.models?.length || cache.domain !== domain) return [];
+  const overrides = loadConfig().contextWindowOverrides;
+  return cache.models.map(m => ({ ...m, contextWindow: inferContextWindow(m.id, overrides) }));
 }
 
 async function loadCloudDefs(domain: string, apiKey: string, force: boolean): Promise<ProviderModelConfig[]> {
@@ -399,23 +553,28 @@ export default async function (pi: ExtensionAPI) {
   migrateLegacyAuth();
   const config = loadConfig();
 
-  let planKey: string | null = null;
-  try {
-    const auth = readAuth();
-    planKey = auth["alibaba-plan"]?.access || auth["alibaba-plan"]?.key || null;
-  } catch {}
-  const cloudKey = readCloudKey();
+  // The factory runs pre-session: no ctx.modelRegistry yet, so under
+  // oh-my-pi (credentials in agent.db) this finds nothing and the
+  // session_start handler below performs the first live fetch instead.
+  // Under pi the auth.json file is readable here, preserving startup-time
+  // catalogs and enabledModels validation.
+  const planCreds = planCredFrom() ?? undefined;
+  const cloudKey = cloudKeyFrom();
 
   // ── Live catalog fetch (before provider registration) ───────────────
-  let planCreds: { access?: string; refresh?: string } | undefined;
-  if (planKey) { try { planCreds = readAuth()["alibaba-plan"]; } catch {} }
   const planEndpoints = resolvePlanEndpoints(planCreds);
   const cloudDomain = config.cloudDomain || DEFAULT_CLOUD_DOMAIN;
   const cloudFmt = config.cloudApiFormat || "anthropic-messages";
 
   if (planCreds?.access) planDefs = await loadPlanDefs(true, planCreds);
   if (cloudKey) cloudDefs = await loadCloudDefs(cloudDomain, cloudKey, true);
-  // Keep the Cloud provider visible in /login even with no models yet (issue #1).
+  // No credential readable pre-session (always the case under oh-my-pi): seed
+  // from the last-known-good cache so the first registration already carries
+  // the real catalog.
+  if (!planDefs.length) planDefs = cachedPlanDefs();
+  if (!cloudDefs.length) cloudDefs = cachedCloudDefs(cloudDomain);
+  // Keep both providers visible in /login even with no models yet (issue #1).
+  if (!planDefs.length) planDefs = PLAN_LOGIN_SEED;
   if (!cloudDefs.length) cloudDefs = CLOUD_LOGIN_SEED;
 
   // ── Plan provider ───────────────────────────────────────────────────
@@ -476,24 +635,37 @@ export default async function (pi: ExtensionAPI) {
   });
 
   // ── Lazy refresh: fetch live catalogs and re-register ───────────────
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
    try {
-    const planCred = readAuth()["alibaba-plan"];
+    // Under oh-my-pi this is the first point credentials are reachable
+    // (agent.db via ctx.modelRegistry.authStorage); under pi the registry
+    // and the auth.json fallback agree.
+    const registry: unknown = modelRegistryOf(ctx);
+    const planCred = planCredFrom(registry) ?? undefined;
     planDefs = await loadPlanDefs(false, planCred);
 
-    const key = readCloudKey();
+    const key = cloudKeyFrom(registry);
     if (key) {
       const cfg = loadConfig();
       const domain = cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN;
       cloudDefs = await loadCloudDefs(domain, key, false);
     }
-    // Keep the Cloud provider visible in /login even with no models yet (issue #1).
+    // Keep both providers visible in /login even with no models yet (issue #1).
+    if (!planDefs.length) planDefs = PLAN_LOGIN_SEED;
     if (!cloudDefs.length) cloudDefs = CLOUD_LOGIN_SEED;
 
-    // Re-register both providers with the expanded model lists
+    // Re-register both providers with the expanded model lists.
+    // Unregister first: under pi a duplicate-name registerProvider replaces,
+    // but explicit unregister is the sanctioned path. oh-my-pi has no
+    // unregisterProvider (and ignores duplicate registrations) — skip there;
+    // its factory registration is already cache-seeded, and /alibaba →
+    // Refresh model lists (which reloads) picks up mid-session changes.
+    if (typeof pi.unregisterProvider === "function") {
+      pi.unregisterProvider("alibaba-plan");
+      pi.unregisterProvider("alibaba-cloud");
+    }
     const currentConfig = loadConfig();
-    const currentPlanCreds = readAuth()["alibaba-plan"];
-    const ep = resolvePlanEndpoints(currentPlanCreds);
+    const ep = resolvePlanEndpoints(planCred);
     const currentDomain = currentConfig.cloudDomain || DEFAULT_CLOUD_DOMAIN;
     const currentFmt = currentConfig.cloudApiFormat || "anthropic-messages";
 
@@ -573,12 +745,12 @@ export default async function (pi: ExtensionAPI) {
       if (!choice) return;
 
       const cfg = loadConfig();
-      const auth = readAuth();
-      const planCred = auth["alibaba-plan"];
-      const cloudCred = auth["alibaba-cloud"];
+      const registry: unknown = modelRegistryOf(ctx);
+      const planCred = planCredFrom(registry);
+      const cloudCred = credFromRegistry(registry, "alibaba-cloud") ?? fileCred("alibaba-cloud");
 
       if (choice === "Status") {
-        const ep = resolvePlanEndpoints(planCred);
+        const ep = resolvePlanEndpoints(planCred ?? undefined);
         const planCache = readJSON<PlanCache | null>(PLAN_CACHE_PATH, null);
         const cloudCache = readJSON<CloudCache | null>(CLOUD_CACHE_PATH, null);
         const ageMin = (c: { fetchedAt: number } | null) => c ? Math.round((Date.now() - c.fetchedAt) / 60000) : null;
@@ -612,12 +784,11 @@ export default async function (pi: ExtensionAPI) {
 
       if (choice === "Refresh model lists") {
         try {
-          const planCred = readAuth()["alibaba-plan"];
-          planDefs = await fetchPlanModels(true, planCred);
+          planDefs = await fetchPlanModels(true, planCred ?? undefined);
           let cloudCount = 0;
-          if (cloudCred?.key || cloudCred?.access) {
+          const key = cloudCred?.key ?? cloudCred?.access;
+          if (key) {
             const domain = cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN;
-            const key = cloudCred.key || cloudCred.access;
             cloudDefs = await fetchCloudModels(domain, key, true);
             cloudCount = cloudDefs.length;
           }
@@ -630,18 +801,19 @@ export default async function (pi: ExtensionAPI) {
       }
 
       if (choice === "Re-login Plan") {
-        if (!await ctx.ui.confirm("Wipe Plan credentials and re-login?", "Removes alibaba-plan from auth.json")) return;
-        // Use authStorage.remove() rather than fs.write — it persists AND updates pi's
-        // in-memory credential map, so /login's `• configured` label refreshes without restart.
-        ctx.modelRegistry.authStorage.remove("alibaba-plan");
+        if (!await ctx.ui.confirm("Wipe Plan credentials and re-login?", "Removes the stored alibaba-plan credential")) return;
+        // Goes through the host's authStorage (or the auth.json fallback), so it
+        // persists AND updates the in-memory credential map — /login's
+        // `• configured` label refreshes without restart, under pi and oh-my-pi.
+        removeCred(registry, "alibaba-plan");
         ctx.ui.notify("Plan credentials wiped. Run /login → Alibaba Model Studio Coding Plan.", "info");
         await ctx.reload();
         return;
       }
 
       if (choice === "Re-login Cloud") {
-        if (!await ctx.ui.confirm("Wipe Cloud credentials and re-login?", "Removes alibaba-cloud from auth.json")) return;
-        ctx.modelRegistry.authStorage.remove("alibaba-cloud");
+        if (!await ctx.ui.confirm("Wipe Cloud credentials and re-login?", "Removes the stored alibaba-cloud credential")) return;
+        removeCred(registry, "alibaba-cloud");
         ctx.ui.notify("Cloud credentials wiped. Run /login → Use an API key → Alibaba Cloud (API Key).", "info");
         await ctx.reload();
         return;
@@ -656,9 +828,9 @@ export default async function (pi: ExtensionAPI) {
           // (which prefers credentials.refresh over config) picks up the new endpoints
           // for the existing logged-in session — otherwise the change only takes effect
           // after the user logs out + back in.
-          const currentPlan = ctx.modelRegistry.authStorage.get("alibaba-plan");
+          const currentPlan = planCredFrom(registry);
           if (currentPlan?.type === "oauth") {
-            ctx.modelRegistry.authStorage.set("alibaba-plan", {
+            setCred(registry, "alibaba-plan", {
               ...currentPlan,
               refresh: JSON.stringify({ openai: o, anthropic: a }),
             });
@@ -756,10 +928,10 @@ export default async function (pi: ExtensionAPI) {
           "Wipes config, both auth entries, plan-models cache, and any alibaba-* entries in settings.json (enabledModels + defaultProvider/defaultModel if alibaba). Run before `pi remove` for a clean uninstall.",
         )) return;
         for (const p of [CONFIG_PATH, PLAN_CACHE_PATH, CLOUD_CACHE_PATH]) { try { fs.unlinkSync(p); } catch {} }
-        // Use authStorage.remove() so pi's in-memory credential cache stays in sync —
-        // otherwise /login's "• configured" label persists until pi is restarted.
+        // Goes through the host's authStorage so the in-memory credential cache
+        // stays in sync — otherwise /login's "• configured" label persists until restart.
         for (const k of ["alibaba", "alibaba-plan", "alibaba-cloud", "alibaba-studio", "alibaba-token", "dashscope"]) {
-          ctx.modelRegistry.authStorage.remove(k);
+          removeCred(registry, k);
         }
         // Also strip stale alibaba-* / dashscope-* model ids from settings.json enabledModels,
         // and clear defaultProvider/defaultModel if they reference alibaba (otherwise pi would
