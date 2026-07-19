@@ -53,9 +53,10 @@ After install, restart `pi`. The extension registers two providers and a slash c
 If you've already run `pi remove` and want to clean leftovers manually:
 
 ```bash
+# Agent dir: ~/.pi/agent under pi, ~/.omp/agent under oh-my-pi
 rm -f ~/.pi/agent/alibaba-config.json ~/.pi/agent/alibaba-plan-models.cache.json
-# then edit ~/.pi/agent/auth.json and remove the "alibaba-plan" / "alibaba-cloud" entries
-# then edit ~/.pi/agent/settings.json and drop any "alibaba-*/..." or "dashscope/..." entries from enabledModels
+# then edit <agent dir>/auth.json and remove the "alibaba-plan" / "alibaba-cloud" entries
+# then edit <agent dir>/settings.json and drop any "alibaba-*/..." or "dashscope/..." entries from enabledModels
 ```
 
 ## Two providers
@@ -65,7 +66,7 @@ rm -f ~/.pi/agent/alibaba-config.json ~/.pi/agent/alibaba-plan-models.cache.json
 | `alibaba-plan` | Plans                   | OAuth (paste token) | Model Studio Coding Plan subscription |
 | `alibaba-cloud`| API Keys (via OAuth UI) | OAuth (paste API key) | Pay-per-token DashScope API           |
 
-Both are registered as `oauth`-shaped providers so they appear in `/login` and live in `~/.pi/agent/auth.json` under their respective keys. The Plan provider stores the chosen endpoints in the `refresh` field as JSON; the Cloud provider stores its domain in `~/.pi/agent/alibaba-config.json`.
+Both are registered as `oauth`-shaped providers so they appear in `/login` and live in the host's `auth.json` (`~/.pi/agent/auth.json` under pi, `~/.omp/agent/auth.json` under oh-my-pi) under their respective keys. The Plan provider stores the chosen endpoints in the `refresh` field as JSON; the Cloud provider stores its domain in `alibaba-config.json` in the same agent directory. The agent directory is resolved generically: `PI_CODING_AGENT_DIR` if set, then `PI_CONFIG_DIR`, then `~/.omp` when running under oh-my-pi, otherwise `~/.pi` (named profiles via `OMP_PROFILE`/`PI_PROFILE` resolve to `<config root>/profiles/<name>/agent`).
 
 > **Cloud without `/login`:** the Cloud provider also reads the `DASHSCOPE_API_KEY` environment variable. If it's set, the extension fetches your live model catalog from it on startup — no `/login` needed. With **no** credential at all (no `/login`, no env var) the Cloud provider still shows up in `/login → Use an API key` via a single placeholder model, so you can sign in; your real catalog replaces it the moment a key is present.
 
@@ -108,7 +109,7 @@ The plan model list is fetched from the canonical Qwen Code template:
 
 <https://github.com/QwenLM/qwen-code/blob/main/packages/cli/src/constants/codingPlan.ts>
 
-Cached at `~/.pi/agent/alibaba-plan-models.cache.json` for **4 hours**. The live API is always the source of truth; on a failed fetch the extension falls back to the last-known-good on-disk cache (and, if there's no cache either, registers an empty list rather than crashing). Force a refresh from `/alibaba → Refresh model lists`.
+Cached at `<agent dir>/alibaba-plan-models.cache.json` for **4 hours**. The live API is always the source of truth; on a failed fetch the extension falls back to the last-known-good on-disk cache (and, if there's no cache either, registers an empty list rather than crashing). Force a refresh from `/alibaba → Refresh model lists`.
 
 `deepseek-v3.2` (and any plan-served models the upstream template omits) is merged in via a small allow-list so the picker reflects what the endpoint actually serves. The Cloud provider mirrors the live `/v1/models` response — V4 Pro/Flash, Qwen 3.7 Max/Plus, Qwen 3.6 Max/Plus, Kimi K2.6, GLM-5, MiniMax M2.5 etc. all surface automatically as Alibaba ships them.
 
@@ -146,10 +147,12 @@ Cached at `~/.pi/agent/alibaba-plan-models.cache.json` for **4 hours**. The live
 
 | Path                                                  | Purpose                            |
 |-------------------------------------------------------|------------------------------------|
-| `~/.pi/agent/auth.json`                               | Both provider credentials (0600)   |
-| `~/.pi/agent/alibaba-config.json`                     | Endpoint / domain / format config  |
-| `~/.pi/agent/alibaba-plan-models.cache.json`          | 48 h plan-models cache             |
-| `~/.pi/agent/alibaba-cloud-models.cache.json`         | 48 h cloud-models cache            |
+| `<agent dir>/auth.json`                               | Both provider credentials (0600)   |
+| `<agent dir>/alibaba-config.json`                     | Endpoint / domain / format config  |
+| `<agent dir>/alibaba-plan-models.cache.json`          | 48 h plan-models cache             |
+| `<agent dir>/alibaba-cloud-models.cache.json`         | 48 h cloud-models cache            |
+
+`<agent dir>` is `~/.pi/agent` under pi and `~/.omp/agent` under oh-my-pi (honoring `PI_CODING_AGENT_DIR`, `PI_CONFIG_DIR`, and named profiles).
 
 ## From the same author
 
