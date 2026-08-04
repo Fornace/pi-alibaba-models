@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.15
+
+- **Fix: large tool calls no longer truncated on reasoning models.** Every Cloud model used to report a flat `maxTokens: 8192` (Plan non-DeepSeek models: 65536). On pi's Anthropic path, `max_tokens` is a total budget shared between thinking and the final answer, so with pi's high thinking budget (16384) the answer budget collapsed to 8192 − 7168 = **1024 tokens** — enough to cut big `write`/`edit` calls mid-arguments (the model never emitted the `path` field; the content string ended abruptly). Reasoning models now report `maxTokens: 32768` → answer budget 32768 − 16384 = **16384** at high thinking, on both providers (Plan non-DeepSeek included; DeepSeek keeps its 16384 OpenAI-path value). 32768 was verified empirically as the universal `max_tokens` ceiling on the Anthropic-compat endpoint (non-reasoning `qwen-plus` rejects 65536 with `Range of max_tokens should be [1, 32768]`; `qwen3.8-max`, `deepseek-v4-flash`, `glm-5.2` and `kimi-k2.7-code` all accept 32768), so it can never be rejected as out of range. Non-reasoning models keep 8192 (pi sends it straight as the output cap — no thinking squeeze).
+- Cached catalogs (offline fallback) now also recompute `maxTokens`, so stale caches pick up the fix.
+
 ## 1.0.14
 
 - Release bump. First npm publish since 1.0.10; bundles the 1.0.11–1.0.13 work: Qwen 3.7 Plus/Max metadata (1M context, 3.7 Plus multimodal), shared Plan/Cloud capability heuristics, the `/alibaba → Context Window — Override` setting, the `/login` Cloud-visibility fix (#1), and Cloud catalog loading from `$DASHSCOPE_API_KEY`.

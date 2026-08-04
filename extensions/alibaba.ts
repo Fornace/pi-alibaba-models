@@ -86,6 +86,28 @@ const inferContextWindow = (id: string, overrides?: Record<string, number>): num
   return 131072;
 };
 
+// Infer max output tokens (the maxTokens card value) from model id.
+//
+// pi's Anthropic path splits maxTokens into a thinking budget and a final
+// answer budget (maxTokens − thinkingBudget). The card used to be a flat
+// 8192 for every Cloud model; with pi's high thinking budget (16384) the
+// answer budget collapsed to 8192 − 7168 = 1024 tokens, so large tool calls
+// (big write/edit content, JSON-escaped) were truncated mid-arguments — the
+// model never got to emit the `path` field and the content string was cut.
+//
+// Verified empirically against the Anthropic-compat endpoint: 32768 is the
+// universal max_tokens ceiling (non-reasoning qwen-plus rejects 65536 with
+// `Range of max_tokens should be [1, 32768]`, while qwen3.8-max,
+// deepseek-v4-flash, glm-5.2 and kimi-k2.7-code all accept 32768). So every
+// reasoning model gets 32768 → answer budget = 32768 − 16384 = 16384 at
+// high thinking, and 32768 can never be rejected as out of range. Non-
+// reasoning models keep the conservative 8192 (pi sends it straight as the
+// output cap; there is no thinking squeeze to fix).
+const inferMaxTokens = (id: string): number => {
+  if (isReasoningModel(id)) return 32768;
+  return 8192;
+};
+
 // Heuristic: turn a bare model id (from /v1/models API) into a full PlanModelDef.
 function inferPlanDef(id: string, overrides?: Record<string, number>): PlanModelDef {
   const openaiOnly = /deepseek/i.test(id);
@@ -97,7 +119,7 @@ function inferPlanDef(id: string, overrides?: Record<string, number>): PlanModel
     reasoning: isReasoning,
     input: isVision ? ["text", "image"] : ["text"],
     contextWindow: inferContextWindow(id, overrides),
-    maxTokens: openaiOnly ? 16384 : 65536,
+    maxTokens: openaiOnly ? 16384 : inferMaxTokens(id),
     compat: isReasoning ? { thinkingFormat: "qwen" } : undefined,
     openaiOnly,
   };
@@ -207,7 +229,7 @@ async function fetchCloudModels(domain: string, apiKey: string, _force = false):
           input: isVision ? (["text", "image"] as ("text" | "image")[]) : (["text"] as ("text" | "image")[]),
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow: inferContextWindow(m.id, overrides),
-          maxTokens: 8192,
+          maxTokens: inferMaxTokens(m.id),
           compat: isReasoning ? { thinkingFormat: "qwen" as const } : undefined,
         };
       });
@@ -300,11 +322,13 @@ async function loadCloudDefs(domain: string, apiKey: string, force: boolean): Pr
     const cache = readJSON<CloudCache | null>(CLOUD_CACHE_PATH, null);
     if (cache?.models?.length && cache.domain === domain) {
       console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); using cached models (${cache.models.length}, ${cacheAgeMin(cache.fetchedAt)}m old).`);
-      // Recompute context windows to apply the latest inferContextWindow logic
+      // Recompute context windows and max tokens to apply the latest
+      // inference logic to stale caches
       const overrides = loadConfig().contextWindowOverrides;
       return cache.models.map(m => ({
         ...m,
         contextWindow: inferContextWindow(m.id, overrides),
+        maxTokens: inferMaxTokens(m.id),
       }));
     }
     console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); no cache — Cloud models unavailable until reconnected. Other providers still work.`);
