@@ -164,12 +164,13 @@ function resolvePlanEndpoints(credentials?: { access?: string; refresh?: string 
   };
 }
 
-function buildPlanModels(defs: PlanModelDef[], openaiUrl: string, anthropicUrl: string): ProviderModelConfig[] {
+export function buildPlanModels(defs: PlanModelDef[], openaiUrl: string, anthropicUrl: string): ProviderModelConfig[] {
   return defs.map((m) => {
     const useOpenAI = !!m.openaiOnly || /deepseek/i.test(m.id);
     return {
       id: m.id, name: m.name, reasoning: m.reasoning, input: m.input,
-      contextWindow: m.contextWindow, maxTokens: m.maxTokens, compat: m.compat,
+      contextWindow: m.contextWindow, maxTokens: m.maxTokens,
+      compat: useOpenAI ? { ...(m.compat ?? {}), supportsDeveloperRole: false } : m.compat,
       thinkingLevelMap: m.reasoning ? { off: null } : undefined,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       baseUrl: useOpenAI ? openaiUrl : anthropicUrl,
@@ -217,7 +218,7 @@ async function fetchCloudModels(domain: string, apiKey: string, _force = false):
   } finally { clearTimeout(t); }
 }
 
-function buildCloudModels(models: ProviderModelConfig[], domain: string, fmt: string): ProviderModelConfig[] {
+export function buildCloudModels(models: ProviderModelConfig[], domain: string, fmt: string): ProviderModelConfig[] {
   return models.map((m) => {
     const useOpenAI = /deepseek/i.test(m.id) || fmt === "openai-completions";
     return {
@@ -225,6 +226,7 @@ function buildCloudModels(models: ProviderModelConfig[], domain: string, fmt: st
       thinkingLevelMap: m.reasoning ? { off: null } : undefined,
       baseUrl: useOpenAI ? `https://${domain}/compatible-mode/v1` : `https://${domain}/apps/anthropic`,
       api: (useOpenAI ? "openai-completions" : "anthropic-messages") as "anthropic-messages" | "openai-completions",
+      compat: useOpenAI ? { ...(m.compat ?? {}), supportsDeveloperRole: false } : m.compat,
     };
   });
 }
