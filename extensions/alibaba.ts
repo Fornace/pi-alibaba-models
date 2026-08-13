@@ -171,7 +171,7 @@ export function buildPlanModels(defs: PlanModelDef[], openaiUrl: string, anthrop
       id: m.id, name: m.name, reasoning: m.reasoning, input: m.input,
       contextWindow: m.contextWindow, maxTokens: m.maxTokens,
       compat: useOpenAI ? { ...(m.compat ?? {}), supportsDeveloperRole: false } : m.compat,
-      thinkingLevelMap: m.reasoning ? { off: null } : undefined,
+      thinkingLevelMap: m.reasoning ? { off: null, high: "high", xhigh: "max" } : undefined,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       baseUrl: useOpenAI ? openaiUrl : anthropicUrl,
       api: (useOpenAI ? "openai-completions" : "anthropic-messages") as "anthropic-messages" | "openai-completions",
@@ -223,7 +223,7 @@ export function buildCloudModels(models: ProviderModelConfig[], domain: string, 
     const useOpenAI = /deepseek/i.test(m.id) || fmt === "openai-completions";
     return {
       ...m,
-      thinkingLevelMap: m.reasoning ? { off: null } : undefined,
+      thinkingLevelMap: m.reasoning ? { off: null, high: "high", xhigh: "max" } : undefined,
       baseUrl: useOpenAI ? `https://${domain}/compatible-mode/v1` : `https://${domain}/apps/anthropic`,
       api: (useOpenAI ? "openai-completions" : "anthropic-messages") as "anthropic-messages" | "openai-completions",
       compat: useOpenAI ? { ...(m.compat ?? {}), supportsDeveloperRole: false } : m.compat,
