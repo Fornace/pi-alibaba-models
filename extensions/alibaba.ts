@@ -266,27 +266,34 @@ const CLOUD_LOGIN_SEED: ProviderModelConfig[] = [{
 }];
 
 // ── Offline-resilient catalog loaders ────────────────────────────────
-// Live API is the source of truth. But a network failure must never take
-// the whole extension (and therefore pi, and the user's local models) down
-// with it. So: try live, fall back to the last-known-good on-disk cache,
-// warn, and never throw. Cache is an offline fallback only — when the API
-// is reachable, its response always wins and overwrites the cache.
+// The on-disk cache is BOTH a fast path and a failure fallback:
+//   • fresh cache (< MODELS_CACHE_TTL_MS) → serve it, skip the network entirely.
+//     pi blocks on this loader before registering providers, so an unconditional
+//     fetch put a cross-region round trip (~0.7-1.2s to ap-southeast-1, twice —
+//     once here, once from session_start) in front of every single pi launch.
+//   • stale cache or `force` → fetch live; the response always wins and rewrites
+//     the cache. A network failure falls back to the stale cache, warns, and
+//     never throws — it must not take pi's other providers down with it.
 const cacheAgeMin = (fetchedAt: number) => Math.round((Date.now() - fetchedAt) / 60000);
+export const isCacheFresh = (fetchedAt?: number, now = Date.now()) =>
+  typeof fetchedAt === "number" && now - fetchedAt < MODELS_CACHE_TTL_MS;
+
+// Recompute context windows so cached entries pick up the latest inferContextWindow logic.
+function rehydrate<T extends { id: string }>(models: T[]): T[] {
+  const overrides = loadConfig().contextWindowOverrides;
+  return models.map((m) => ({ ...m, contextWindow: inferContextWindow(m.id, overrides) }));
+}
 
 async function loadPlanDefs(force: boolean, credentials?: { access?: string; refresh?: string }): Promise<PlanModelDef[]> {
   if (!credentials?.access) return [];
+  const cache = readJSON<PlanCache | null>(PLAN_CACHE_PATH, null);
+  if (!force && cache?.models?.length && isCacheFresh(cache.fetchedAt)) return rehydrate(cache.models);
   try {
     return await fetchPlanModels(force, credentials);
   } catch (e: any) {
-    const cache = readJSON<PlanCache | null>(PLAN_CACHE_PATH, null);
     if (cache?.models?.length) {
       console.warn(`[alibaba] Plan catalog fetch failed (${e?.message || e}); using cached models (${cache.models.length}, ${cacheAgeMin(cache.fetchedAt)}m old).`);
-      // Recompute context windows to apply the latest inferContextWindow logic
-      const overrides = loadConfig().contextWindowOverrides;
-      return cache.models.map(m => ({
-        ...m,
-        contextWindow: inferContextWindow(m.id, overrides),
-      }));
+      return rehydrate(cache.models);
     }
     console.warn(`[alibaba] Plan catalog fetch failed (${e?.message || e}); no cache — Plan models unavailable until reconnected. Other providers still work.`);
     return [];
@@ -294,18 +301,15 @@ async function loadPlanDefs(force: boolean, credentials?: { access?: string; ref
 }
 
 async function loadCloudDefs(domain: string, apiKey: string, force: boolean): Promise<ProviderModelConfig[]> {
+  const cache = readJSON<CloudCache | null>(CLOUD_CACHE_PATH, null);
+  const usable = cache?.models?.length && cache.domain === domain ? cache : null;
+  if (!force && usable && isCacheFresh(usable.fetchedAt)) return rehydrate(usable.models);
   try {
     return await fetchCloudModels(domain, apiKey, force);
   } catch (e: any) {
-    const cache = readJSON<CloudCache | null>(CLOUD_CACHE_PATH, null);
-    if (cache?.models?.length && cache.domain === domain) {
-      console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); using cached models (${cache.models.length}, ${cacheAgeMin(cache.fetchedAt)}m old).`);
-      // Recompute context windows to apply the latest inferContextWindow logic
-      const overrides = loadConfig().contextWindowOverrides;
-      return cache.models.map(m => ({
-        ...m,
-        contextWindow: inferContextWindow(m.id, overrides),
-      }));
+    if (usable) {
+      console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); using cached models (${usable.models.length}, ${cacheAgeMin(usable.fetchedAt)}m old).`);
+      return rehydrate(usable.models);
     }
     console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); no cache — Cloud models unavailable until reconnected. Other providers still work.`);
     return [];
@@ -413,8 +417,11 @@ export default async function (pi: ExtensionAPI) {
   const cloudDomain = config.cloudDomain || DEFAULT_CLOUD_DOMAIN;
   const cloudFmt = config.cloudApiFormat || "anthropic-messages";
 
-  if (planCreds?.access) planDefs = await loadPlanDefs(true, planCreds);
-  if (cloudKey) cloudDefs = await loadCloudDefs(cloudDomain, cloudKey, true);
+  // Cache-first: pi awaits this factory before it registers providers, so forcing a
+  // live fetch here taxed every launch. session_start refreshes right after, and
+  // /alibaba → "Refresh catalogs" still forces a live fetch on demand.
+  if (planCreds?.access) planDefs = await loadPlanDefs(false, planCreds);
+  if (cloudKey) cloudDefs = await loadCloudDefs(cloudDomain, cloudKey, false);
   // Keep the Cloud provider visible in /login even with no models yet (issue #1).
   if (!cloudDefs.length) cloudDefs = CLOUD_LOGIN_SEED;
 
