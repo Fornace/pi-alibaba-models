@@ -2,6 +2,17 @@ import type { ExtensionAPI, ProviderModelConfig, ExtensionCommandContext } from 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  ALIBABA_TOOLS_PARAMETERS,
+  buildSidecarRequest,
+  dashScopeErrorMessage,
+  formatSidecarProgress,
+  formatSidecarResult,
+  pickSidecarModel,
+  postSidecar,
+  type SidecarAction,
+  type SidecarStrategy,
+} from "./sidecar.ts";
 
 // ── Paths ─────────────────────────────────────────────────────────────
 const HOME_DIR = path.join(os.homedir(), ".pi", "agent");
@@ -12,21 +23,58 @@ const CLOUD_CACHE_PATH = path.join(HOME_DIR, "alibaba-cloud-models.cache.json");
 
 const MODELS_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
 
+// Reasoning models: hide "off" (same as before) and opt in to high/max.
+// Intermediate pi levels are explicitly unsupported — do not alias them
+// onto "high" the way DeepSeek's native map does.
+const REASONING_THINKING_LEVEL_MAP = {
+  off: null,
+  minimal: null,
+  low: null,
+  medium: null,
+  high: "high",
+  xhigh: null,
+  max: "max",
+} as const;
+
 const DEFAULT_PLAN_OPENAI = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 const DEFAULT_PLAN_ANTHROPIC = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic";
 const DEFAULT_CLOUD_DOMAIN = "dashscope-intl.aliyuncs.com";
+const DEFAULT_CLOUD_US_DOMAIN = "dashscope-us.aliyuncs.com";
+const DEFAULT_CLOUD_CN_DOMAIN = "dashscope.aliyuncs.com";
+const DEFAULT_CLOUD_HK_DOMAIN = "cn-hongkong.dashscope.aliyuncs.com";
+
+// Workspace-specific domains (recommended for Beijing/Singapore; required for
+// Japan/Frankfurt/US). {wsid} = the Model Studio business-space ID.
+const workspaceDomain = (wsid: string, region: string) => `${wsid}.${region}.maas.aliyuncs.com`;
+const WSID_BEIJING = "cn-beijing";
+const WSID_SINGAPORE = "ap-southeast-1";
+const WSID_TOKYO = "ap-northeast-1";
+const WSID_FRANKFURT = "eu-central-1";
+const WSID_US = "us-east-1";
+
+type CloudApiFormat = "anthropic-messages" | "openai-completions" | "openai-responses";
 
 // ── Config / auth helpers ─────────────────────────────────────────────
 interface AlibabaConfig {
   planOpenAI?: string;
   planAnthropic?: string;
   cloudDomain?: string;
-  cloudApiFormat?: "anthropic-messages" | "openai-completions";
+  cloudApiFormat?: CloudApiFormat;
   // Override the context-window shown on a model's card in the picker.
   // Keyed by exact model id (e.g. "qwen3.7-plus"); the special key "*" applies
   // to every model that has no explicit entry. Values are token counts.
   // Useful when the inferred size is wrong for a brand-new model.
   contextWindowOverrides?: Record<string, number>;
+  // When true (default), the Cloud catalog is filtered to the models the
+  // account is authorized to call (GET /api/v1/models/permissions) whenever
+  // that endpoint is reachable. Set to false to always show the full catalog.
+  cloudAuthorizedOnly?: boolean;
+  // Opt-in Pi tool `alibaba_tools`: a sidecar POST to DashScope built-in
+  // tools (web_search / extractor / interpreter). Off by default so it
+  // does not inflate every session or bill search on DeepSeek/Kimi/GLM.
+  cloudSidecarTools?: boolean;
+  // Optional Cloud model id for the sidecar (Qwen only). Empty = pick from catalog.
+  cloudSidecarModel?: string;
 }
 
 const readJSON = <T>(p: string, fallback: T): T => {
@@ -38,8 +86,34 @@ const writeJSON = (p: string, data: unknown) => {
 };
 const loadConfig = (): AlibabaConfig => readJSON<AlibabaConfig>(CONFIG_PATH, {});
 const saveConfig = (c: AlibabaConfig) => writeJSON(CONFIG_PATH, c);
-const readAuth = (): Record<string, any> => readJSON<Record<string, any>>(AUTH_PATH, {});
-const writeAuth = (a: Record<string, any>) => writeJSON(AUTH_PATH, a);
+// auth.json entries: api_key ({type,key}) or oauth ({type,access,refresh,expires}).
+interface AuthEntry {
+  type?: string;
+  key?: string;
+  access?: string;
+  refresh?: string;
+  expires?: number;
+}
+const readAuth = (): Record<string, AuthEntry> => readJSON<Record<string, AuthEntry>>(AUTH_PATH, {});
+const writeAuth = (a: Record<string, AuthEntry>) => writeJSON(AUTH_PATH, a);
+
+// pi used to expose ctx.modelRegistry.authStorage (in-memory + disk). Newer
+// public types dropped it; keep using it when present so /login's
+// "configured" label stays in sync, otherwise write auth.json directly.
+interface AuthStorageLike {
+  remove(id: string): void;
+  get(id: string): AuthEntry | undefined;
+  set(id: string, entry: AuthEntry): void;
+}
+function authStore(ctx: ExtensionCommandContext): AuthStorageLike {
+  const live = (ctx.modelRegistry as { authStorage?: AuthStorageLike }).authStorage;
+  if (live) return live;
+  return {
+    remove(id) { const a = readAuth(); delete a[id]; writeAuth(a); },
+    get(id) { return readAuth()[id]; },
+    set(id, entry) { const a = readAuth(); a[id] = entry; writeAuth(a); },
+  };
+}
 
 // ── Plan model definitions ────────────────────────────────────────────
 // Anthropic-compatible by default; deepseek forced to openai-completions.
@@ -56,11 +130,15 @@ interface PlanCache { fetchedAt: number; source: string; models: PlanModelDef[];
 // window, reasoning, and vision are inferred from the id. Both the Plan
 // and Cloud code paths route through these helpers so they never drift
 // apart. Context windows are corrected here as new models ship.
-const isVisionModel = (id: string): boolean =>
-  /vl|vision/i.test(id) || /^qwen3\.\d+-plus\b/i.test(id) || /kimi/i.test(id);
+export const isVisionModel = (id: string): boolean =>
+  /vl|vision/i.test(id) || /^qwen3\.\d+-plus\b/i.test(id) || /^qwen3\.8\b/i.test(id) || /kimi/i.test(id);
 
-const isReasoningModel = (id: string): boolean =>
-  /qwq|max|thinking|deepseek|minimax|kimi|glm|3\.[5-9]/i.test(id);
+// Kimi on DashScope Anthropic-compat rejects thinking_budget
+// (`Parameter thinking_budget is not supported`), and `--thinking off`
+// still sends the field. Do not flag kimi as reasoning — pi then omits it.
+// See Fornace/pi-alibaba-models#9.
+export const isReasoningModel = (id: string): boolean =>
+  !/^kimi/i.test(id) && /qwq|max|thinking|deepseek|minimax|glm|3\.[5-9]/i.test(id);
 
 // Infer context window (tokens) from model id. Sources:
 // https://www.alibabacloud.com/help/en/model-studio/models
@@ -86,6 +164,93 @@ const inferContextWindow = (id: string, overrides?: Record<string, number>): num
   return 131072;
 };
 
+// Infer max output tokens (the maxTokens card value) from model id.
+//
+// pi's Anthropic path splits maxTokens into a thinking budget and a final
+// answer budget (maxTokens − thinkingBudget). The card used to be a flat
+// 8192 for every Cloud model; with pi's high thinking budget (16384) the
+// answer budget collapsed to 8192 − 7168 = 1024 tokens, so large tool calls
+// (big write/edit content, JSON-escaped) were truncated mid-arguments — the
+// model never got to emit the `path` field and the content string was cut.
+//
+// Verified empirically against the Anthropic-compat endpoint: 32768 is the
+// universal max_tokens ceiling (non-reasoning qwen-plus rejects 65536 with
+// `Range of max_tokens should be [1, 32768]`, while qwen3.8-max,
+// deepseek-v4-flash, glm-5.2 and kimi-k2.7-code all accept 32768). So every
+// reasoning model gets 32768 → answer budget = 32768 − 16384 = 16384 at
+// high thinking, and 32768 can never be rejected as out of range. Non-
+// reasoning models keep the conservative 8192 (pi sends it straight as the
+// output cap; there is no thinking squeeze to fix).
+export const inferAnthropicMaxTokens = (id: string): number => {
+  if (isReasoningModel(id)) return 32768;
+  return 8192;
+};
+
+// Catalog / OpenAI-path ceilings. Used for Chat Completions and Responses —
+// those APIs do not share max_tokens between thinking and the answer the way
+// Anthropic-compat does. Do not use these on the Anthropic path.
+export const inferOpenAIMaxTokens = (id: string): number => {
+  if (/^deepseek-?v4/i.test(id)) return 384000;
+  if (/^qwen3\.\d+-max\b/i.test(id)) return 131072;
+  if (/^glm-?5\.2\b/i.test(id)) return 131072;
+  if (/^glm-?5\.1\b/i.test(id)) return 128000;
+  if (/^glm-?5\b/i.test(id)) return 16384;
+  if (/^qwen3\./i.test(id)) return 65536;
+  if (/^kimi-k2\.([6-9]|\d{2,})/i.test(id)) return 262144;
+  if (/^kimi/i.test(id)) return 98304;
+  if (/^minimax/i.test(id)) return 32768;
+  return 16384;
+};
+
+const QWEN38_EFFORT_MAP: Record<string, string | null> = {
+  off: null, minimal: null, low: "low", medium: "medium", high: null, xhigh: "xhigh", max: null,
+};
+const GLM_DEEPSEEK_EFFORT_MAP: Record<string, string | null> = {
+  off: null, minimal: null, low: null, medium: null, high: "high", xhigh: null, max: "max",
+};
+// Responses API: reasoning.effort. Docs list none/minimal/low/medium/high plus
+// xhigh/max (Beijing/Singapore). Map pi's "off" onto "none" so thinking can
+// actually be disabled. https://help.aliyun.com/zh/model-studio/compatibility-with-openai-responses-api
+const RESPONSES_EFFORT_MAP: Record<string, string | null> = {
+  off: "none", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max",
+};
+
+const OPENAI_BASE_COMPAT = {
+  thinkingFormat: "qwen" as const,
+  supportsDeveloperRole: false,
+  supportsStore: false,
+};
+
+export function thinkingConfigFor(id: string, api: string): {
+  thinkingLevelMap: Record<string, string | null>;
+  compat: {
+    thinkingFormat: "qwen";
+    supportsReasoningEffort?: boolean;
+    supportsDeveloperRole?: boolean;
+    supportsStore?: boolean;
+  };
+} | undefined {
+  if (!isReasoningModel(id)) return undefined;
+  if (api === "openai-completions") {
+    if (/^qwen3\.8\b/i.test(id)) {
+      return { thinkingLevelMap: QWEN38_EFFORT_MAP, compat: { ...OPENAI_BASE_COMPAT, supportsReasoningEffort: true } };
+    }
+    if (/^deepseek-?v4/i.test(id) || /^glm-?5\.\d/i.test(id)) {
+      return { thinkingLevelMap: GLM_DEEPSEEK_EFFORT_MAP, compat: { ...OPENAI_BASE_COMPAT, supportsReasoningEffort: true } };
+    }
+    return { thinkingLevelMap: { ...REASONING_THINKING_LEVEL_MAP }, compat: { ...OPENAI_BASE_COMPAT } };
+  }
+  if (api === "openai-responses") {
+    return { thinkingLevelMap: { ...RESPONSES_EFFORT_MAP }, compat: { ...OPENAI_BASE_COMPAT } };
+  }
+  return { thinkingLevelMap: { ...REASONING_THINKING_LEVEL_MAP }, compat: { thinkingFormat: "qwen" } };
+}
+
+export function resolveCloudApi(id: string, fmt: CloudApiFormat): CloudApiFormat {
+  if (fmt === "anthropic-messages" && /deepseek/i.test(id)) return "openai-completions";
+  return fmt;
+}
+
 // Heuristic: turn a bare model id (from /v1/models API) into a full PlanModelDef.
 function inferPlanDef(id: string, overrides?: Record<string, number>): PlanModelDef {
   const openaiOnly = /deepseek/i.test(id);
@@ -97,7 +262,7 @@ function inferPlanDef(id: string, overrides?: Record<string, number>): PlanModel
     reasoning: isReasoning,
     input: isVision ? ["text", "image"] : ["text"],
     contextWindow: inferContextWindow(id, overrides),
-    maxTokens: openaiOnly ? 16384 : 65536,
+    maxTokens: openaiOnly ? inferOpenAIMaxTokens(id) : inferAnthropicMaxTokens(id),
     compat: isReasoning ? { thinkingFormat: "qwen" } : undefined,
     openaiOnly,
   };
@@ -164,24 +329,118 @@ function resolvePlanEndpoints(credentials?: { access?: string; refresh?: string 
   };
 }
 
-function buildPlanModels(defs: PlanModelDef[], openaiUrl: string, anthropicUrl: string): ProviderModelConfig[] {
+export function buildPlanModels(defs: PlanModelDef[], openaiUrl: string, anthropicUrl: string): ProviderModelConfig[] {
   return defs.map((m) => {
     const useOpenAI = !!m.openaiOnly || /deepseek/i.test(m.id);
+    const api = (useOpenAI ? "openai-completions" : "anthropic-messages") as "anthropic-messages" | "openai-completions";
+    const tc = thinkingConfigFor(m.id, api);
     return {
       id: m.id, name: m.name, reasoning: m.reasoning, input: m.input,
-      contextWindow: m.contextWindow, maxTokens: m.maxTokens, compat: m.compat,
-      thinkingLevelMap: m.reasoning ? { off: null } : undefined,
+      contextWindow: m.contextWindow, maxTokens: m.maxTokens,
+      compat: useOpenAI
+        ? { ...(m.compat ?? {}), ...(tc?.compat ?? {}), supportsDeveloperRole: false, supportsStore: false }
+        : (tc?.compat ?? m.compat),
+      thinkingLevelMap: tc?.thinkingLevelMap,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       baseUrl: useOpenAI ? openaiUrl : anthropicUrl,
-      api: (useOpenAI ? "openai-completions" : "anthropic-messages") as "anthropic-messages" | "openai-completions",
+      api,
     };
   });
 }
 
 // ── Cloud builders ────────────────────────────────────────────────────
-interface CloudCache { fetchedAt: number; domain: string; models: ProviderModelConfig[]; }
+interface CloudCache {
+  fetchedAt: number;
+  domain: string;
+  models: ProviderModelConfig[];
+  authorizedOnly?: boolean;
+}
 
-async function fetchCloudModels(domain: string, apiKey: string, _force = false): Promise<ProviderModelConfig[]> {
+interface ApiV1Model {
+  model: string;
+  name?: string;
+  capabilities?: string[];
+  inference_metadata?: { request_modality?: string[]; response_modality?: string[] };
+  model_info?: {
+    context_window?: number | null;
+    max_output_tokens?: number | null;
+  };
+  prices?: Array<{
+    range_name?: string;
+    prices?: Array<{ type?: string; price?: string; price_unit?: string }>;
+  }>;
+}
+
+export function parseApiV1Prices(prices: ApiV1Model["prices"]): { input: number; output: number } {
+  const out = { input: 0, output: 0 };
+  if (!prices?.length) return out;
+  const range = prices.find((p) => p.range_name === "Default") ?? prices[0];
+  for (const item of range?.prices ?? []) {
+    if (!item.type || !item.price || !/百万/i.test(item.price_unit ?? "")) continue;
+    const n = Number(item.price);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    if (/input/i.test(item.type)) out.input = n;
+    else if (/output/i.test(item.type)) out.output = n;
+  }
+  return out;
+}
+
+export function applyAuthorizedFilter<T extends { id: string }>(
+  models: T[],
+  authorized: Set<string> | null,
+): { models: T[]; authorizedOnly: boolean } {
+  if (!authorized) return { models, authorizedOnly: false };
+  const filtered = models.filter((m) => authorized.has(m.id));
+  if (!filtered.length) return { models, authorizedOnly: false };
+  return { models: filtered, authorizedOnly: true };
+}
+
+async function fetchCloudModelsV1(domain: string, apiKey: string): Promise<ProviderModelConfig[] | null> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const models: ProviderModelConfig[] = [];
+    const exclude = /(image|audio|video|tts|asr|embed|vector|rerank|wan|omni|livetranslate|realtime|3d|face)/i;
+    for (let page = 1; page <= 5; page++) {
+      const params = new URLSearchParams({ capabilities: "TG", page_no: String(page), page_size: "100" });
+      const res = await fetch(`https://${domain}/api/v1/models?${params}`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: ctrl.signal,
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as { output?: { total?: number; models?: ApiV1Model[] } };
+      const output = json.output;
+      if (!output?.models?.length) break;
+      const overrides = loadConfig().contextWindowOverrides;
+      for (const m of output.models) {
+        if (!m.model || exclude.test(m.model)) continue;
+        const caps = m.capabilities ?? [];
+        const reqMod = m.inference_metadata?.request_modality ?? [];
+        const ctx = m.model_info?.context_window;
+        const maxOut = m.model_info?.max_output_tokens;
+        const price = parseApiV1Prices(m.prices);
+        const kimi = /^kimi/i.test(m.model);
+        models.push({
+          id: m.model,
+          name: m.name || m.model,
+          reasoning: kimi ? false : (isReasoningModel(m.model) || caps.includes("Reasoning")),
+          input: isVisionModel(m.model) || reqMod.includes("Image") || caps.includes("VU")
+            ? (["text", "image"] as ("text" | "image")[])
+            : (["text"] as ("text" | "image")[]),
+          cost: { input: price.input, output: price.output, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: typeof ctx === "number" && ctx > 0 ? ctx : inferContextWindow(m.model, overrides),
+          maxTokens: typeof maxOut === "number" && maxOut > 0 ? maxOut : inferOpenAIMaxTokens(m.model),
+        });
+      }
+      if (models.length >= (output.total ?? 0) || output.models.length < 100) break;
+    }
+    return models.length ? models : null;
+  } catch {
+    return null;
+  } finally { clearTimeout(t); }
+}
+
+async function fetchCloudModelsCompat(domain: string, apiKey: string): Promise<ProviderModelConfig[]> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 4000);
   try {
@@ -192,10 +451,9 @@ async function fetchCloudModels(domain: string, apiKey: string, _force = false):
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = (await res.json()) as { data?: { id: string; name?: string }[] };
     if (!json.data?.length) throw new Error("No models");
-    // Filter out non-LLMs (image, audio, video, embedding, etc.) — we only want chat models.
     const exclude = /(image|audio|video|tts|asr|embed|vector|rerank|wan|omni|livetranslate|realtime)/i;
     const overrides = loadConfig().contextWindowOverrides;
-    const models = json.data
+    return json.data
       .filter((m) => !exclude.test(m.id))
       .map((m) => {
         const isVision = isVisionModel(m.id);
@@ -207,24 +465,159 @@ async function fetchCloudModels(domain: string, apiKey: string, _force = false):
           input: isVision ? (["text", "image"] as ("text" | "image")[]) : (["text"] as ("text" | "image")[]),
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow: inferContextWindow(m.id, overrides),
-          maxTokens: 8192,
-          compat: isReasoning ? { thinkingFormat: "qwen" as const } : undefined,
+          maxTokens: inferOpenAIMaxTokens(m.id),
         };
       });
-    const cache: CloudCache = { fetchedAt: Date.now(), domain, models };
-    writeJSON(CLOUD_CACHE_PATH, cache);
-    return models;
   } finally { clearTimeout(t); }
 }
 
-function buildCloudModels(models: ProviderModelConfig[], domain: string, fmt: string): ProviderModelConfig[] {
+async function fetchCloudAuthorizedModels(domain: string, apiKey: string): Promise<Set<string> | null> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const authorized = new Set<string>();
+    for (let page = 1; page <= 5; page++) {
+      const params = new URLSearchParams({
+        authorization_scope: "AUTHORIZED",
+        action: "INFERENCE",
+        page_no: String(page),
+        page_size: "200",
+      });
+      const res = await fetch(`https://${domain}/api/v1/models/permissions?${params}`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: ctrl.signal,
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as {
+        output?: {
+          total?: number;
+          permissions?: Array<{ model?: string; permissions?: { inference?: boolean } }>;
+        };
+      };
+      const output = json.output;
+      if (!output?.permissions?.length) break;
+      for (const p of output.permissions) {
+        if (p.model && p.permissions?.inference) authorized.add(p.model);
+      }
+      if (output.permissions.length < 200) break;
+    }
+    return authorized.size ? authorized : null;
+  } catch {
+    return null;
+  } finally { clearTimeout(t); }
+}
+
+async function fetchCloudModels(domain: string, apiKey: string, _force = false): Promise<ProviderModelConfig[]> {
+  const v1 = await fetchCloudModelsV1(domain, apiKey);
+  if (v1) {
+    let models = v1;
+    let authorizedOnly = false;
+    if (loadConfig().cloudAuthorizedOnly !== false) {
+      const authorized = await fetchCloudAuthorizedModels(domain, apiKey);
+      const filtered = applyAuthorizedFilter(models, authorized);
+      models = filtered.models;
+      authorizedOnly = filtered.authorizedOnly;
+    }
+    const cache: CloudCache = { fetchedAt: Date.now(), domain, models, authorizedOnly };
+    writeJSON(CLOUD_CACHE_PATH, cache);
+    return models;
+  }
+  const models = await fetchCloudModelsCompat(domain, apiKey);
+  const cache: CloudCache = { fetchedAt: Date.now(), domain, models, authorizedOnly: false };
+  writeJSON(CLOUD_CACHE_PATH, cache);
+  return models;
+}
+
+interface ApiV1QuotaLimit {
+  request_limit?: number | null;
+  request_limit_period?: number | null;
+  usage_limit?: number | null;
+  usage_limit_field?: string | null;
+  usage_limit_period?: number | null;
+  async_user_queue_limit?: number | null;
+  async_user_concurrency_limit?: number | null;
+}
+
+export interface CloudQuotaInfo {
+  model: string;
+  modelLimit: ApiV1QuotaLimit;
+  hasWorkspaceLimit: boolean;
+}
+
+async function fetchCloudQuotas(domain: string, apiKey: string): Promise<Map<string, CloudQuotaInfo> | null> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const map = new Map<string, CloudQuotaInfo>();
+    let total = Infinity;
+    for (let page = 1; page <= 5 && map.size < total; page++) {
+      const params = new URLSearchParams({ page_no: String(page), page_size: "100" });
+      const res = await fetch(`https://${domain}/api/v1/models/limits?${params}`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: ctrl.signal,
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as {
+        output?: {
+          total?: number;
+          quotas?: Array<{ model: string; model_limit?: ApiV1QuotaLimit | null; workspace_limit?: ApiV1QuotaLimit | null }>;
+        };
+      };
+      const output = json.output;
+      if (!output?.quotas?.length) break;
+      total = output.total ?? total;
+      for (const q of output.quotas) {
+        if (!q.model || !q.model_limit) continue;
+        map.set(q.model, { model: q.model, modelLimit: q.model_limit, hasWorkspaceLimit: !!q.workspace_limit });
+      }
+      if (output.quotas.length < 100) break;
+    }
+    return map.size ? map : null;
+  } catch {
+    return null;
+  } finally { clearTimeout(t); }
+}
+
+export function formatQuota(q: CloudQuotaInfo): string {
+  const l = q.modelLimit;
+  let s = `${l.request_limit ?? 0} ${l.request_limit_period === 1 ? "req/s" : `req/${l.request_limit_period ?? 60}s`}`;
+  if (l.usage_limit != null && l.usage_limit_field && l.usage_limit_period != null) {
+    s += `; ${l.usage_limit.toLocaleString("en-US")} ${l.usage_limit_field}/per-${l.usage_limit_period}s`;
+  } else {
+    s += "; usage: none";
+  }
+  if (l.async_user_queue_limit != null || l.async_user_concurrency_limit != null) {
+    s += `; async queue ${l.async_user_queue_limit ?? "—"} / concurrency ${l.async_user_concurrency_limit ?? "—"}`;
+  }
+  if (q.hasWorkspaceLimit) s += "; workspace-limit set";
+  return s;
+}
+
+function cloudDefaultTransport(domain: string, fmt: CloudApiFormat): { api: CloudApiFormat; baseUrl: string } {
+  const api = fmt === "anthropic-messages" ? "anthropic-messages" : fmt;
+  return {
+    api,
+    baseUrl: api === "anthropic-messages"
+      ? `https://${domain}/apps/anthropic`
+      : `https://${domain}/compatible-mode/v1`,
+  };
+}
+
+export function buildCloudModels(models: ProviderModelConfig[], domain: string, fmt: string): ProviderModelConfig[] {
+  const format = (fmt as CloudApiFormat) || "anthropic-messages";
   return models.map((m) => {
-    const useOpenAI = /deepseek/i.test(m.id) || fmt === "openai-completions";
+    const api = resolveCloudApi(m.id, format);
+    const tc = thinkingConfigFor(m.id, api);
+    const openai = api !== "anthropic-messages";
     return {
       ...m,
-      thinkingLevelMap: m.reasoning ? { off: null } : undefined,
-      baseUrl: useOpenAI ? `https://${domain}/compatible-mode/v1` : `https://${domain}/apps/anthropic`,
-      api: (useOpenAI ? "openai-completions" : "anthropic-messages") as "anthropic-messages" | "openai-completions",
+      maxTokens: api === "anthropic-messages" ? inferAnthropicMaxTokens(m.id) : (m.maxTokens || inferOpenAIMaxTokens(m.id)),
+      thinkingLevelMap: tc?.thinkingLevelMap,
+      compat: openai
+        ? { ...(m.compat ?? {}), ...(tc?.compat ?? {}), supportsDeveloperRole: false, supportsStore: false }
+        : (tc?.compat ?? m.compat),
+      baseUrl: openai ? `https://${domain}/compatible-mode/v1` : `https://${domain}/apps/anthropic`,
+      api,
     };
   });
 }
@@ -266,27 +659,64 @@ const CLOUD_LOGIN_SEED: ProviderModelConfig[] = [{
 }];
 
 // ── Offline-resilient catalog loaders ────────────────────────────────
-// Live API is the source of truth. But a network failure must never take
-// the whole extension (and therefore pi, and the user's local models) down
-// with it. So: try live, fall back to the last-known-good on-disk cache,
-// warn, and never throw. Cache is an offline fallback only — when the API
-// is reachable, its response always wins and overwrites the cache.
+// The on-disk cache is both a fast path and a failure fallback:
+//   • fresh cache (< MODELS_CACHE_TTL_MS) and not `force` → serve it, skip
+//     the network. pi awaits this loader before registering providers, so
+//     an unconditional fetch put a cross-region round trip in front of
+//     every launch (and session_start used to do it again).
+//   • stale cache, missing cache, or `force` → fetch live; the response
+//     always wins and rewrites the cache. A network failure falls back to
+//     the stale cache, warns, and never throws.
 const cacheAgeMin = (fetchedAt: number) => Math.round((Date.now() - fetchedAt) / 60000);
+
+export const isCacheFresh = (fetchedAt?: number, now = Date.now()): boolean =>
+  typeof fetchedAt === "number" && Number.isFinite(fetchedAt) && now - fetchedAt < MODELS_CACHE_TTL_MS;
+
+function rehydratePlan(models: PlanModelDef[]): PlanModelDef[] {
+  const overrides = loadConfig().contextWindowOverrides;
+  return models.map((m) => {
+    const fresh = inferPlanDef(m.id, overrides);
+    return {
+      ...m,
+      reasoning: fresh.reasoning,
+      input: fresh.input,
+      contextWindow: fresh.contextWindow,
+      maxTokens: fresh.maxTokens,
+      compat: fresh.compat,
+      openaiOnly: fresh.openaiOnly,
+    };
+  });
+}
+
+function rehydrateCloud(models: ProviderModelConfig[]): ProviderModelConfig[] {
+  const overrides = loadConfig().contextWindowOverrides;
+  return models.map((m) => {
+    const kimi = /^kimi/i.test(m.id);
+    const reasoning = kimi ? false : (isReasoningModel(m.id) || !!m.reasoning);
+    const vision = isVisionModel(m.id) || m.input?.includes("image");
+    const override = overrides?.[m.id] ?? overrides?.["*"];
+    return {
+      ...m,
+      reasoning,
+      input: vision ? (["text", "image"] as ("text" | "image")[]) : (["text"] as ("text" | "image")[]),
+      contextWindow: typeof override === "number" && override > 0
+        ? override
+        : (m.contextWindow > 0 ? m.contextWindow : inferContextWindow(m.id, overrides)),
+      maxTokens: m.maxTokens > 0 ? m.maxTokens : inferOpenAIMaxTokens(m.id),
+    };
+  });
+}
 
 async function loadPlanDefs(force: boolean, credentials?: { access?: string; refresh?: string }): Promise<PlanModelDef[]> {
   if (!credentials?.access) return [];
+  const cache = readJSON<PlanCache | null>(PLAN_CACHE_PATH, null);
+  if (!force && cache?.models?.length && isCacheFresh(cache.fetchedAt)) return rehydratePlan(cache.models);
   try {
     return await fetchPlanModels(force, credentials);
   } catch (e: any) {
-    const cache = readJSON<PlanCache | null>(PLAN_CACHE_PATH, null);
     if (cache?.models?.length) {
       console.warn(`[alibaba] Plan catalog fetch failed (${e?.message || e}); using cached models (${cache.models.length}, ${cacheAgeMin(cache.fetchedAt)}m old).`);
-      // Recompute context windows to apply the latest inferContextWindow logic
-      const overrides = loadConfig().contextWindowOverrides;
-      return cache.models.map(m => ({
-        ...m,
-        contextWindow: inferContextWindow(m.id, overrides),
-      }));
+      return rehydratePlan(cache.models);
     }
     console.warn(`[alibaba] Plan catalog fetch failed (${e?.message || e}); no cache — Plan models unavailable until reconnected. Other providers still work.`);
     return [];
@@ -294,18 +724,15 @@ async function loadPlanDefs(force: boolean, credentials?: { access?: string; ref
 }
 
 async function loadCloudDefs(domain: string, apiKey: string, force: boolean): Promise<ProviderModelConfig[]> {
+  const cache = readJSON<CloudCache | null>(CLOUD_CACHE_PATH, null);
+  const usable = cache?.models?.length && cache.domain === domain ? cache : null;
+  if (!force && usable && isCacheFresh(usable.fetchedAt)) return rehydrateCloud(usable.models);
   try {
     return await fetchCloudModels(domain, apiKey, force);
   } catch (e: any) {
-    const cache = readJSON<CloudCache | null>(CLOUD_CACHE_PATH, null);
-    if (cache?.models?.length && cache.domain === domain) {
-      console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); using cached models (${cache.models.length}, ${cacheAgeMin(cache.fetchedAt)}m old).`);
-      // Recompute context windows to apply the latest inferContextWindow logic
-      const overrides = loadConfig().contextWindowOverrides;
-      return cache.models.map(m => ({
-        ...m,
-        contextWindow: inferContextWindow(m.id, overrides),
-      }));
+    if (usable) {
+      console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); using cached models (${usable.models.length}, ${cacheAgeMin(usable.fetchedAt)}m old).`);
+      return rehydrateCloud(usable.models);
     }
     console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); no cache — Cloud models unavailable until reconnected. Other providers still work.`);
     return [];
@@ -320,8 +747,8 @@ let cloudDefs: ProviderModelConfig[] = [];
 // ── Migration ─────────────────────────────────────────────────────────
 const isPlanKey = (k: string) => k.startsWith("sk-sp-") || k.startsWith("sk-tok-");
 
-function extractKey(entry: any): string | undefined {
-  if (!entry || typeof entry !== "object") return undefined;
+function extractKey(entry: AuthEntry | undefined): string | undefined {
+  if (!entry) return undefined;
   return entry.key || entry.access || undefined;
 }
 
@@ -411,10 +838,14 @@ export default async function (pi: ExtensionAPI) {
   if (planKey) { try { planCreds = readAuth()["alibaba-plan"]; } catch {} }
   const planEndpoints = resolvePlanEndpoints(planCreds);
   const cloudDomain = config.cloudDomain || DEFAULT_CLOUD_DOMAIN;
-  const cloudFmt = config.cloudApiFormat || "anthropic-messages";
+  const cloudFmt: CloudApiFormat = config.cloudApiFormat || "anthropic-messages";
 
-  if (planCreds?.access) planDefs = await loadPlanDefs(true, planCreds);
-  if (cloudKey) cloudDefs = await loadCloudDefs(cloudDomain, cloudKey, true);
+  // Cache-first: pi awaits this factory before it registers providers, so
+  // forcing a live fetch here taxed every launch. session_start uses the
+  // same loaders with force=false; /alibaba → "Refresh model lists" still
+  // calls the fetchers directly.
+  if (planCreds?.access) planDefs = await loadPlanDefs(false, planCreds);
+  if (cloudKey) cloudDefs = await loadCloudDefs(cloudDomain, cloudKey, false);
   // Keep the Cloud provider visible in /login even with no models yet (issue #1).
   if (!cloudDefs.length) cloudDefs = CLOUD_LOGIN_SEED;
 
@@ -466,11 +897,12 @@ export default async function (pi: ExtensionAPI) {
   });
 
   // ── Cloud provider ─────────────────────────────────────────────────
+  const cloudTransport = cloudDefaultTransport(cloudDomain, cloudFmt);
   pi.registerProvider("alibaba-cloud", {
     name: "Alibaba Cloud (API Key)",
-    baseUrl: `https://${cloudDomain}/apps/anthropic`,
+    baseUrl: cloudTransport.baseUrl,
     apiKey: "$DASHSCOPE_API_KEY",
-    api: "anthropic-messages",
+    api: cloudTransport.api,
     authHeader: true,
     models: buildCloudModels(cloudDefs, cloudDomain, cloudFmt),
   });
@@ -495,7 +927,7 @@ export default async function (pi: ExtensionAPI) {
     const currentPlanCreds = readAuth()["alibaba-plan"];
     const ep = resolvePlanEndpoints(currentPlanCreds);
     const currentDomain = currentConfig.cloudDomain || DEFAULT_CLOUD_DOMAIN;
-    const currentFmt = currentConfig.cloudApiFormat || "anthropic-messages";
+    const currentFmt: CloudApiFormat = currentConfig.cloudApiFormat || "anthropic-messages";
 
     pi.registerProvider("alibaba-plan", {
       name: "Alibaba Model Studio Plan",
@@ -542,11 +974,12 @@ export default async function (pi: ExtensionAPI) {
       },
     });
 
+    const cloudTransport = cloudDefaultTransport(currentDomain, currentFmt);
     pi.registerProvider("alibaba-cloud", {
       name: "Alibaba Cloud (API Key)",
-      baseUrl: `https://${currentDomain}/apps/anthropic`,
+      baseUrl: cloudTransport.baseUrl,
       apiKey: "$DASHSCOPE_API_KEY",
-      api: "anthropic-messages",
+      api: cloudTransport.api,
       authHeader: true,
       models: buildCloudModels(cloudDefs, currentDomain, currentFmt),
     });
@@ -567,6 +1000,9 @@ export default async function (pi: ExtensionAPI) {
         "Plan — Change Endpoints",
         "Cloud — Change Domain",
         "Cloud — Change API Format",
+        "Cloud — DashScope built-in tools",
+        "Rate limits (Cloud)",
+        "Cloud — Authorized-only Filter",
         "Context Window — Override",
         "Reset all",
       ]);
@@ -597,6 +1033,8 @@ export default async function (pi: ExtensionAPI) {
           `Cloud: ${cloudCred ? "logged in" : (process.env.DASHSCOPE_API_KEY ? "via $DASHSCOPE_API_KEY" : "not logged in")}`,
           `       Domain:    ${cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN}`,
           `       Format:    ${cfg.cloudApiFormat || "anthropic-messages"}`,
+          `       Sidecar:   ${cfg.cloudSidecarTools ? `on (${cfg.cloudSidecarModel || "auto Qwen"})` : "off"}`,
+          `       Auth-only: ${cfg.cloudAuthorizedOnly === false ? "off" : "on (when endpoint available)"}${cloudCache?.authorizedOnly ? " — active (filtered list)" : ""}`,
           `       Models:    ${cloudDefs.length} (${cloudState})`,
         ];
         const overrides = cfg.contextWindowOverrides;
@@ -614,11 +1052,11 @@ export default async function (pi: ExtensionAPI) {
         try {
           const planCred = readAuth()["alibaba-plan"];
           planDefs = await fetchPlanModels(true, planCred);
+          const cloudKey = readCloudKey();
           let cloudCount = 0;
-          if (cloudCred?.key || cloudCred?.access) {
+          if (cloudKey) {
             const domain = cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN;
-            const key = cloudCred.key || cloudCred.access;
-            cloudDefs = await fetchCloudModels(domain, key, true);
+            cloudDefs = await fetchCloudModels(domain, cloudKey, true);
             cloudCount = cloudDefs.length;
           }
           ctx.ui.notify(`Plan: ${planDefs.length} models. Cloud: ${cloudCount > 0 ? `${cloudCount} models` : "skipped (not logged in)"}.`, "info");
@@ -633,7 +1071,7 @@ export default async function (pi: ExtensionAPI) {
         if (!await ctx.ui.confirm("Wipe Plan credentials and re-login?", "Removes alibaba-plan from auth.json")) return;
         // Use authStorage.remove() rather than fs.write — it persists AND updates pi's
         // in-memory credential map, so /login's `• configured` label refreshes without restart.
-        ctx.modelRegistry.authStorage.remove("alibaba-plan");
+        authStore(ctx).remove("alibaba-plan");
         ctx.ui.notify("Plan credentials wiped. Run /login → Alibaba Model Studio Coding Plan.", "info");
         await ctx.reload();
         return;
@@ -641,7 +1079,7 @@ export default async function (pi: ExtensionAPI) {
 
       if (choice === "Re-login Cloud") {
         if (!await ctx.ui.confirm("Wipe Cloud credentials and re-login?", "Removes alibaba-cloud from auth.json")) return;
-        ctx.modelRegistry.authStorage.remove("alibaba-cloud");
+        authStore(ctx).remove("alibaba-cloud");
         ctx.ui.notify("Cloud credentials wiped. Run /login → Use an API key → Alibaba Cloud (API Key).", "info");
         await ctx.reload();
         return;
@@ -656,9 +1094,10 @@ export default async function (pi: ExtensionAPI) {
           // (which prefers credentials.refresh over config) picks up the new endpoints
           // for the existing logged-in session — otherwise the change only takes effect
           // after the user logs out + back in.
-          const currentPlan = ctx.modelRegistry.authStorage.get("alibaba-plan");
+          const store = authStore(ctx);
+          const currentPlan = store.get("alibaba-plan");
           if (currentPlan?.type === "oauth") {
-            ctx.modelRegistry.authStorage.set("alibaba-plan", {
+            store.set("alibaba-plan", {
               ...currentPlan,
               refresh: JSON.stringify({ openai: o, anthropic: a }),
             });
@@ -671,12 +1110,32 @@ export default async function (pi: ExtensionAPI) {
 
       if (choice === "Cloud — Change Domain") {
         const sel = await ctx.ui.select("Cloud endpoint:", [
-          "International (dashscope-intl.aliyuncs.com)",
-          "China (dashscope.aliyuncs.com)",
+          `International (${DEFAULT_CLOUD_DOMAIN})`,
+          `China (${DEFAULT_CLOUD_CN_DOMAIN})`,
+          `US — Virginia (${DEFAULT_CLOUD_US_DOMAIN})`,
+          `Hong Kong (${DEFAULT_CLOUD_HK_DOMAIN})`,
+          "China — Beijing workspace domain…",
+          "Singapore workspace domain…",
+          "Japan — Tokyo workspace domain…",
+          "Germany — Frankfurt workspace domain…",
+          "US — workspace domain…",
           "Custom…",
         ]);
         if (!sel) return;
         let domain = sel.match(/\(([^)]+)\)/)?.[1] || "";
+        if (sel.endsWith("workspace domain…")) {
+          const wsid = (await ctx.ui.input("Model Studio business-space ID (console → 业务空间详情):"))?.trim();
+          const region = sel.startsWith("China")
+            ? WSID_BEIJING
+            : sel.startsWith("Singapore")
+              ? WSID_SINGAPORE
+              : sel.startsWith("Japan")
+                ? WSID_TOKYO
+                : sel.startsWith("US")
+                  ? WSID_US
+                  : WSID_FRANKFURT;
+          if (wsid) domain = workspaceDomain(wsid, region);
+        }
         if (sel.startsWith("Custom")) domain = (await ctx.ui.input("Cloud domain:")) || "";
         if (domain) {
           cfg.cloudDomain = domain; saveConfig(cfg);
@@ -687,11 +1146,88 @@ export default async function (pi: ExtensionAPI) {
       }
 
       if (choice === "Cloud — Change API Format") {
-        const sel = await ctx.ui.select("Cloud API format:", ["Anthropic (recommended)", "OpenAI"]);
+        const sel = await ctx.ui.select("Cloud API format:", [
+          "Anthropic Messages (recommended)",
+          "OpenAI Chat Completions",
+          "OpenAI Responses",
+        ]);
         if (!sel) return;
-        cfg.cloudApiFormat = sel.startsWith("OpenAI") ? "openai-completions" : "anthropic-messages";
+        cfg.cloudApiFormat = sel.startsWith("Anthropic")
+          ? "anthropic-messages"
+          : sel.startsWith("OpenAI Responses")
+            ? "openai-responses"
+            : "openai-completions";
         saveConfig(cfg);
         ctx.ui.notify(`Cloud format: ${cfg.cloudApiFormat}`, "info");
+        await ctx.reload();
+        return;
+      }
+
+      if (choice === "Cloud — DashScope built-in tools") {
+        const sel = await ctx.ui.select("alibaba_tools sidecar (Cloud Qwen only, billed separately):", [
+          cfg.cloudSidecarTools ? "On (keep enabled)" : "Enable",
+          "Disable",
+          "Enable and set sidecar model…",
+        ]);
+        if (!sel) return;
+        if (sel === "Disable") {
+          cfg.cloudSidecarTools = false;
+          saveConfig(cfg);
+          ctx.ui.notify("alibaba_tools disabled. Reloading…", "info");
+          await ctx.reload();
+          return;
+        }
+        cfg.cloudSidecarTools = true;
+        if (sel.startsWith("Enable and set")) {
+          const id = (await ctx.ui.input(
+            `Sidecar Qwen model id (blank = auto; currently ${cfg.cloudSidecarModel || "auto"}):`,
+          ))?.trim();
+          if (id) cfg.cloudSidecarModel = id;
+          else delete cfg.cloudSidecarModel;
+        }
+        saveConfig(cfg);
+        if (!readCloudKey()) {
+          ctx.ui.notify("alibaba_tools enabled, but no Cloud key yet. /login → Alibaba Cloud or set $DASHSCOPE_API_KEY, then retry.", "warning");
+        } else {
+          ctx.ui.notify(`alibaba_tools enabled (${cfg.cloudSidecarModel || "auto Qwen"}). Reloading…`, "info");
+        }
+        await ctx.reload();
+        return;
+      }
+
+      if (choice === "Rate limits (Cloud)") {
+        const key = readCloudKey();
+        if (!key) {
+          ctx.ui.notify("Cloud not logged in — no key in auth.json and no $DASHSCOPE_API_KEY. Run /login first.", "error");
+          return;
+        }
+        const domain = cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN;
+        const quotas = await fetchCloudQuotas(domain, key);
+        if (!quotas) {
+          ctx.ui.notify(
+            `Could not fetch rate limits from https://${domain}/api/v1/models/limits. ` +
+            "This endpoint is only documented on the Beijing workspace domain so far — set one via " +
+            "/alibaba → Cloud — Change Domain (e.g. {WorkspaceId}.cn-beijing.maas.aliyuncs.com) and retry.",
+            "error",
+          );
+          return;
+        }
+        const chatIds = cloudDefs.length > 1 ? new Set(cloudDefs.map((m) => m.id)) : null;
+        const entries = [...quotas.values()].filter((q) => !chatIds || chatIds.has(q.model)).sort((a, b) => a.model.localeCompare(b.model));
+        const MAX_SHOWN = 60;
+        const lines = [`Rate limits — ${domain} (showing ${Math.min(entries.length, MAX_SHOWN)} of ${quotas.size}):`];
+        for (const q of entries.slice(0, MAX_SHOWN)) lines.push(`  ${q.model}: ${formatQuota(q)}`);
+        if (entries.length > MAX_SHOWN) lines.push(`  … and ${entries.length - MAX_SHOWN} more`);
+        if (!entries.length) lines.push("  (no quotas for the current model list)");
+        ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
+
+      if (choice === "Cloud — Authorized-only Filter") {
+        const next = cfg.cloudAuthorizedOnly === false;
+        cfg.cloudAuthorizedOnly = next;
+        saveConfig(cfg);
+        ctx.ui.notify(`Cloud authorized-only filter: ${next ? "ON" : "OFF"} — reloading…`, "info");
         await ctx.reload();
         return;
       }
@@ -758,8 +1294,9 @@ export default async function (pi: ExtensionAPI) {
         for (const p of [CONFIG_PATH, PLAN_CACHE_PATH, CLOUD_CACHE_PATH]) { try { fs.unlinkSync(p); } catch {} }
         // Use authStorage.remove() so pi's in-memory credential cache stays in sync —
         // otherwise /login's "• configured" label persists until pi is restarted.
+        const store = authStore(ctx);
         for (const k of ["alibaba", "alibaba-plan", "alibaba-cloud", "alibaba-studio", "alibaba-token", "dashscope"]) {
-          ctx.modelRegistry.authStorage.remove(k);
+          store.remove(k);
         }
         // Also strip stale alibaba-* / dashscope-* model ids from settings.json enabledModels,
         // and clear defaultProvider/defaultModel if they reference alibaba (otherwise pi would
@@ -788,4 +1325,73 @@ export default async function (pi: ExtensionAPI) {
       }
     },
   });
+
+  if (config.cloudSidecarTools) {
+    pi.registerTool({
+      name: "alibaba_tools",
+      label: "Alibaba tools",
+      description:
+        "Separate billed Qwen sidecar for current web information, page extraction, " +
+        "sandbox computation, or image search. Not for local files or shell commands.",
+      promptSnippet:
+        "alibaba_tools: billed Qwen sidecar; search=current facts, research=pages/multi-source, " +
+        "code=sandbox, image=pictures.",
+      promptGuidelines: [
+        "Use only when current external information or a DashScope sandbox is needed; skip local/repository work and equivalent results already available from another tool.",
+        "Use search for quick lookups. Use research directly for page extraction or multi-source synthesis, or when search is insufficient; research is slower and costlier.",
+      ],
+      parameters: ALIBABA_TOOLS_PARAMETERS,
+      executionMode: "parallel",
+      async execute(_toolCallId, rawParams: { action?: string; task?: string; strategy?: SidecarStrategy }, signal?: AbortSignal, onUpdate?: (partial: { content: { type: "text"; text: string }[]; details?: unknown }) => void) {
+        const params = rawParams as { action?: string; task?: string; strategy?: SidecarStrategy };
+        const action = String(params.action || "search") as SidecarAction;
+        const task = typeof params.task === "string" ? params.task.trim() : "";
+        const strategy = params.strategy;
+        if (!task) throw new Error("alibaba_tools requires a non-empty task.");
+        if (!["research", "search", "code", "image"].includes(action)) {
+          throw new Error(`Unknown action "${action}". Use search, research, code, or image.`);
+        }
+        const key = readCloudKey();
+        if (!key) {
+          throw new Error("No Cloud API key. Run /login → Alibaba Cloud (API Key) or set $DASHSCOPE_API_KEY.");
+        }
+        const live = loadConfig();
+        const domain = live.cloudDomain || DEFAULT_CLOUD_DOMAIN;
+        const picked = pickSidecarModel({
+          preferred: live.cloudSidecarModel,
+          catalogIds: cloudDefs.map((m) => m.id),
+          action,
+        });
+        if ("error" in picked) throw new Error(picked.error);
+        const req = buildSidecarRequest({
+          model: picked.id,
+          transport: picked.transport,
+          action,
+          task,
+          strategy,
+        });
+        onUpdate?.({
+          content: [{ type: "text", text: formatSidecarProgress(action, 0, { text: "", sources: [], calls: [] }) }],
+          details: { action, model: picked.id, transport: picked.transport, partial: true },
+        });
+        const res = await postSidecar(domain, key, req, signal, (parsed, elapsedMs) => {
+          onUpdate?.({
+            content: [{ type: "text", text: formatSidecarProgress(action, elapsedMs, parsed) }],
+            details: { action, model: picked.id, transport: picked.transport, partial: true, calls: parsed.calls },
+          });
+        });
+        if (!res.ok) throw new Error(dashScopeErrorMessage(res.status, res.json));
+        return {
+          content: [{ type: "text", text: formatSidecarResult(res.parsed) }],
+          details: {
+            action,
+            model: picked.id,
+            transport: picked.transport,
+            calls: res.parsed.calls,
+            sourceCount: res.parsed.sources.length,
+          },
+        };
+      },
+    } as Parameters<ExtensionAPI["registerTool"]>[0]);
+  }
 }

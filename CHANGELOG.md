@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.3.1
+
+- Sidecar SSE parser splits frames on LF or CRLF blank lines, so CRLF streams no longer glue events and drop JSON.
+- An already-aborted input `AbortSignal` cancels `postSidecar` immediately instead of waiting out the timeout.
+- README Cloud auth matches the API-key provider (`$DASHSCOPE_API_KEY` / `{ type: "api_key", key }`), not the old OAuth-shaped registration.
+
+## 1.3.0
+
+- **Leaner `alibaba_tools` prompt:** removes repeated guidance while making the cost and latency trade-offs explicit. Quick current-web lookups use `search`; page extraction and multi-source synthesis can go directly to the slower, costlier `research` action.
+- **Clearer tool boundaries:** the model is told to skip the sidecar for local/repository work and when equivalent results are already available from another tool.
+- **Simpler calls:** `action` is now optional and defaults to `search`; the legacy Completions-only `strategy` is explicitly marked as normally unnecessary.
+
+## 1.2.1
+
+- **`alibaba_tools` is search-first.** Guidelines and schema tell the model to use `search` for live facts; `research` only if that was too thin.
+- **Streaming sidecar:** DashScope Responses/Completions are requested with `stream: true`. Progress (elapsed time, search/extract calls, partial text) is pushed through pi's `onUpdate` so the TUI is not a silent hang. Failures **throw** so the transcript marks `isError`.
+- **Timeouts:** `research` 8 min, others 3 min (was 3 min / 90 s). Override with `ALIBABA_SIDECAR_TIMEOUT_MS`. Timeout text suggests `search` instead of `research`.
+- Auto sidecar model prefers Flash/Plus over Max when the catalog has both. Independent `code`/`image` calls may run in parallel.
+
+## 1.2.0
+
+- **`alibaba_tools` sidecar** (opt-in): `/alibaba → Cloud — DashScope built-in tools` registers one Pi tool that POSTs its own Cloud Completions/Responses request. Actions: `research` (web_search + web_extractor + code_interpreter), `search`, `code`, `image`. Qwen-only allowlist; DeepSeek/Kimi/GLM/MiniMax are rejected. Built-in tool events stay inside the plugin — they are not mixed into pi's agent stream or the current chat format (Anthropic default included).
+- Tests for allowlists, model picking, request bodies, and Responses/Completions result parsing.
+
+## 1.1.0
+
+- **OpenAI Responses API** for Cloud: `/alibaba → Cloud — Change API Format → OpenAI Responses` sets `api: "openai-responses"` on `https://{domain}/compatible-mode/v1` (pi talks to `/responses`). Thinking maps onto Bailian's `reasoning.effort` (`off→none`, plus minimal/low/medium/high/xhigh/max). DeepSeek still falls back to Chat Completions when the Cloud format is Anthropic.
+- **Native Cloud catalog** via `GET /api/v1/models` (real context windows, max output, Reasoning/VU tags, CNY pricing), with the compatible-mode `/models` list as fallback. Anthropic `maxTokens` is still clamped to the verified **32768** ceiling so thinking does not squeeze the answer budget; OpenAI Completions/Responses keep the catalog ceiling.
+- **More Cloud regions**: US-Virginia, Hong Kong, and workspace domains `{WorkspaceId}.{region}.maas.aliyuncs.com` (Beijing / Singapore / Tokyo / Frankfurt / US).
+- **Rate limits (Cloud)** (`GET /api/v1/models/limits`) and an **authorized-only catalog filter** (`GET /api/v1/models/permissions`) — both best-effort, currently documented on the Beijing workspace domain.
+- **OpenAI-compat flags:** `supportsStore: false` next to `supportsDeveloperRole: false`. Qwen 3.8 is vision-capable. Completions effort maps: Qwen 3.8 `low/medium/xhigh`, GLM-5.x / DeepSeek V4 `high/max`. Re-login / Reset / endpoint changes still prefer `authStorage` when pi exposes it, and write `auth.json` directly otherwise.
+- **Startup no longer blocks on a live catalog fetch.** A cache younger than 4 hours is served immediately; `session_start` and `/alibaba → Refresh model lists` still refresh when the cache is stale or when you ask. Fetch failures still fall back to the stale cache.
+- **Thinking levels:** reasoning models expose `high` and `max` in the picker on the Anthropic path. Unused intermediate levels are marked unsupported instead of being aliased onto `"high"`.
+- **Kimi is not flagged as reasoning.** DashScope Anthropic-compat rejects `thinking_budget` for `kimi-k3` / `kimi-k2.7-code` (Fornace#9); `--thinking off` still sent the field. Cached catalogs rehydrate `reasoning` so a stale kimi entry does not keep sending it.
+- Tests: deterministic `node:test` coverage for cache TTL, thinking-level maps, Responses routing, Anthropic maxTokens clamp, native catalog helpers, and reasoning/vision heuristics (no network, no provider).
+
+## 1.0.15
+
+- **Fix: large tool calls no longer truncated on reasoning models.** Every Cloud model used to report a flat `maxTokens: 8192` (Plan non-DeepSeek models: 65536). On pi's Anthropic path, `max_tokens` is a total budget shared between thinking and the final answer, so with pi's high thinking budget (16384) the answer budget collapsed to 8192 − 7168 = **1024 tokens** — enough to cut big `write`/`edit` calls mid-arguments (the model never emitted the `path` field; the content string ended abruptly). Reasoning models now report `maxTokens: 32768` → answer budget 32768 − 16384 = **16384** at high thinking, on both providers (Plan non-DeepSeek included; DeepSeek keeps its 16384 OpenAI-path value). 32768 was verified empirically as the universal `max_tokens` ceiling on the Anthropic-compat endpoint (non-reasoning `qwen-plus` rejects 65536 with `Range of max_tokens should be [1, 32768]`; `qwen3.8-max`, `deepseek-v4-flash`, `glm-5.2` and `kimi-k2.7-code` all accept 32768), so it can never be rejected as out of range. Non-reasoning models keep 8192 (pi sends it straight as the output cap — no thinking squeeze).
+- Cached catalogs (offline fallback) now also recompute `maxTokens`, so stale caches pick up the fix.
+
 ## 1.0.14
 
 - Release bump. First npm publish since 1.0.10; bundles the 1.0.11–1.0.13 work: Qwen 3.7 Plus/Max metadata (1M context, 3.7 Plus multimodal), shared Plan/Cloud capability heuristics, the `/alibaba → Context Window — Override` setting, the `/login` Cloud-visibility fix (#1), and Cloud catalog loading from `$DASHSCOPE_API_KEY`.
