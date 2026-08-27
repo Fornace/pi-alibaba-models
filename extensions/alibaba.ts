@@ -1331,15 +1331,14 @@ export default async function (pi: ExtensionAPI) {
       name: "alibaba_tools",
       label: "Alibaba tools",
       description:
-        "DashScope live web via a sidecar Cloud request (not the current chat format). " +
-        "Prefer action=search for news/docs. Use research only if search was too thin. " +
-        "Also: code (sandbox), image (picture search). Qwen only. Not a shell — use bash for local commands.",
-      promptSnippet: "alibaba_tools: live DashScope search (default), optional research/code/image. Sidecar Cloud Qwen.",
+        "Separate billed Qwen sidecar for current web information, page extraction, " +
+        "sandbox computation, or image search. Not for local files or shell commands.",
+      promptSnippet:
+        "alibaba_tools: billed Qwen sidecar; search=current facts, research=pages/multi-source, " +
+        "code=sandbox, image=pictures.",
       promptGuidelines: [
-        "Use alibaba_tools for live docs, news, weather, or fetching a URL; not for repo files or bash.",
-        "Default to action=search. Use research only after search is too thin and you need page extract or multi-source synthesis.",
-        "Use code for sandbox math; image for pictures. Never pass a shell command to alibaba_tools.",
-        "Skip alibaba_tools when another web-search tool already covers the task.",
+        "Use only when current external information or a DashScope sandbox is needed; skip local/repository work and equivalent results already available from another tool.",
+        "Use search for quick lookups. Use research directly for page extraction or multi-source synthesis, or when search is insufficient; research is slower and costlier.",
       ],
       parameters: ALIBABA_TOOLS_PARAMETERS,
       executionMode: "parallel",

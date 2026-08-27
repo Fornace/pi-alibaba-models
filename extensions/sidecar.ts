@@ -16,10 +16,10 @@ export const ALIBABA_TOOLS_PARAMETERS = {
     action: {
       type: "string" as const,
       enum: ["search", "research", "code", "image"],
+      default: "search",
       description:
-        "search (default for live facts): web search only. " +
-        "research: web_search + page extract + code sandbox — only if search was too thin. " +
-        "code: DashScope code interpreter. image: search images by text. Not a shell.",
+        "search: quick current-web lookup (default). research: page extraction or multi-source synthesis; " +
+        "slower and costlier. code: sandbox computation. image: picture search.",
     },
     task: {
       type: "string" as const,
@@ -29,10 +29,10 @@ export const ALIBABA_TOOLS_PARAMETERS = {
       type: "string" as const,
       enum: ["turbo", "max", "agent", "agent_max"],
       description:
-        "Optional Completions-only search_strategy. Ignored on the Responses path (including typical Qwen search).",
+        "Usually omit. Legacy Completions search strategy; ignored on the usual Responses path.",
     },
   },
-  required: ["action", "task"],
+  required: ["task"],
 };
 
 export function isQwenChatId(id: string): boolean {

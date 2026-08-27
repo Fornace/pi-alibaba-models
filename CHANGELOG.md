@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+
+- **Leaner `alibaba_tools` prompt:** removes repeated guidance while making the cost and latency trade-offs explicit. Quick current-web lookups use `search`; page extraction and multi-source synthesis can go directly to the slower, costlier `research` action.
+- **Clearer tool boundaries:** the model is told to skip the sidecar for local/repository work and when equivalent results are already available from another tool.
+- **Simpler calls:** `action` is now optional and defaults to `search`; the legacy Completions-only `strategy` is explicitly marked as normally unnecessary.
+
 ## 1.2.1
 
 - **`alibaba_tools` is search-first.** Guidelines and schema tell the model to use `search` for live facts; `research` only if that was too thin.
