@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildCloudModels, buildPlanModels } from "../extensions/alibaba.ts";
+import { buildCloudModels, buildPlanModels, isReasoningModel } from "../extensions/alibaba.ts";
 
 const reasoningQwen = {
   id: "qwen3.7-max",
@@ -58,6 +58,27 @@ describe("thinkingLevelMap", () => {
 
     assert.equal(plan.thinkingLevelMap, undefined);
     assert.equal(cloud.thinkingLevelMap, undefined);
+  });
+});
+
+describe("isReasoningModel", () => {
+  it("does not flag kimi — DashScope rejects thinking_budget for those ids", () => {
+    assert.equal(isReasoningModel("kimi-k3"), false);
+    assert.equal(isReasoningModel("kimi-k2.7-code"), false);
+    assert.equal(isReasoningModel("kimi-k2.5"), false);
+  });
+
+  it("still flags qwen max, glm, deepseek, and minimax as reasoning", () => {
+    assert.equal(isReasoningModel("qwen3.7-max"), true);
+    assert.equal(isReasoningModel("qwen3.7-plus"), true);
+    assert.equal(isReasoningModel("glm-5.2"), true);
+    assert.equal(isReasoningModel("deepseek-v4-pro"), true);
+    assert.equal(isReasoningModel("deepseek-v4-flash"), true);
+    assert.equal(isReasoningModel("minimax-m2.5"), true);
+  });
+
+  it("does not flag plain qwen-plus", () => {
+    assert.equal(isReasoningModel("qwen-plus"), false);
   });
 });
 

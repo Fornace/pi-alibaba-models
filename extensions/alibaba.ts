@@ -72,8 +72,12 @@ interface PlanCache { fetchedAt: number; source: string; models: PlanModelDef[];
 const isVisionModel = (id: string): boolean =>
   /vl|vision/i.test(id) || /^qwen3\.\d+-plus\b/i.test(id) || /kimi/i.test(id);
 
-const isReasoningModel = (id: string): boolean =>
-  /qwq|max|thinking|deepseek|minimax|kimi|glm|3\.[5-9]/i.test(id);
+// Kimi on DashScope Anthropic-compat rejects thinking_budget
+// (`Parameter thinking_budget is not supported`), and `--thinking off`
+// still sends the field. Do not flag kimi as reasoning — pi then omits it.
+// See Fornace/pi-alibaba-models#9.
+export const isReasoningModel = (id: string): boolean =>
+  !/^kimi/i.test(id) && /qwq|max|thinking|deepseek|minimax|glm|3\.[5-9]/i.test(id);
 
 // Infer context window (tokens) from model id. Sources:
 // https://www.alibabacloud.com/help/en/model-studio/models
@@ -318,20 +322,33 @@ export const isCacheFresh = (fetchedAt?: number, now = Date.now()): boolean =>
 
 function rehydratePlan(models: PlanModelDef[]): PlanModelDef[] {
   const overrides = loadConfig().contextWindowOverrides;
-  return models.map((m) => ({
-    ...m,
-    contextWindow: inferContextWindow(m.id, overrides),
-    maxTokens: m.openaiOnly || /deepseek/i.test(m.id) ? 16384 : inferMaxTokens(m.id),
-  }));
+  return models.map((m) => {
+    const fresh = inferPlanDef(m.id, overrides);
+    return {
+      ...m,
+      reasoning: fresh.reasoning,
+      input: fresh.input,
+      contextWindow: fresh.contextWindow,
+      maxTokens: fresh.maxTokens,
+      compat: fresh.compat,
+      openaiOnly: fresh.openaiOnly,
+    };
+  });
 }
 
 function rehydrateCloud(models: ProviderModelConfig[]): ProviderModelConfig[] {
   const overrides = loadConfig().contextWindowOverrides;
-  return models.map((m) => ({
-    ...m,
-    contextWindow: inferContextWindow(m.id, overrides),
-    maxTokens: inferMaxTokens(m.id),
-  }));
+  return models.map((m) => {
+    const reasoning = isReasoningModel(m.id);
+    return {
+      ...m,
+      reasoning,
+      input: isVisionModel(m.id) ? (["text", "image"] as ("text" | "image")[]) : (["text"] as ("text" | "image")[]),
+      contextWindow: inferContextWindow(m.id, overrides),
+      maxTokens: inferMaxTokens(m.id),
+      compat: reasoning ? { thinkingFormat: "qwen" as const } : undefined,
+    };
+  });
 }
 
 async function loadPlanDefs(force: boolean, credentials?: { access?: string; refresh?: string }): Promise<PlanModelDef[]> {
