@@ -1,12 +1,16 @@
 # Changelog
 
-## 1.0.16
+## 1.1.0
 
-- **Startup no longer blocks on a live catalog fetch.** A cache younger than 4 hours is served immediately; `session_start` and `/alibaba → Refresh model lists` still refresh when the cache is stale or when you ask. Fetch failures still fall back to the stale cache. Cached Plan entries now also recompute `maxTokens` (DeepSeek stays at 16384 on the OpenAI path).
-- **Thinking levels:** reasoning models expose `high` and `max` in the picker. Unused intermediate levels are marked unsupported instead of being aliased onto `"high"`.
-- **OpenAI-compat:** `supportsDeveloperRole: false` so pi sends the system prompt as `system` — Alibaba rejects the `developer` role.
+- **OpenAI Responses API** for Cloud: `/alibaba → Cloud — Change API Format → OpenAI Responses` sets `api: "openai-responses"` on `https://{domain}/compatible-mode/v1` (pi talks to `/responses`). Thinking maps onto Bailian's `reasoning.effort` (`off→none`, plus minimal/low/medium/high/xhigh/max). DeepSeek still falls back to Chat Completions when the Cloud format is Anthropic.
+- **Native Cloud catalog** via `GET /api/v1/models` (real context windows, max output, Reasoning/VU tags, CNY pricing), with the compatible-mode `/models` list as fallback. Anthropic `maxTokens` is still clamped to the verified **32768** ceiling so thinking does not squeeze the answer budget; OpenAI Completions/Responses keep the catalog ceiling.
+- **More Cloud regions**: US-Virginia, Hong Kong, and workspace domains `{WorkspaceId}.{region}.maas.aliyuncs.com` (Beijing / Singapore / Tokyo / Frankfurt / US).
+- **Rate limits (Cloud)** (`GET /api/v1/models/limits`) and an **authorized-only catalog filter** (`GET /api/v1/models/permissions`) — both best-effort, currently documented on the Beijing workspace domain.
+- **OpenAI-compat flags:** `supportsStore: false` next to `supportsDeveloperRole: false`. Qwen 3.8 is vision-capable. Completions effort maps: Qwen 3.8 `low/medium/xhigh`, GLM-5.x / DeepSeek V4 `high/max`. Re-login / Reset / endpoint changes still prefer `authStorage` when pi exposes it, and write `auth.json` directly otherwise.
+- **Startup no longer blocks on a live catalog fetch.** A cache younger than 4 hours is served immediately; `session_start` and `/alibaba → Refresh model lists` still refresh when the cache is stale or when you ask. Fetch failures still fall back to the stale cache.
+- **Thinking levels:** reasoning models expose `high` and `max` in the picker on the Anthropic path. Unused intermediate levels are marked unsupported instead of being aliased onto `"high"`.
 - **Kimi is not flagged as reasoning.** DashScope Anthropic-compat rejects `thinking_budget` for `kimi-k3` / `kimi-k2.7-code` (Fornace#9); `--thinking off` still sent the field. Cached catalogs rehydrate `reasoning` so a stale kimi entry does not keep sending it.
-- Tests: deterministic `node:test` coverage for cache TTL, thinking-level maps, the developer-role flag, and reasoning heuristics (no network, no provider).
+- Tests: deterministic `node:test` coverage for cache TTL, thinking-level maps, Responses routing, Anthropic maxTokens clamp, native catalog helpers, and reasoning/vision heuristics (no network, no provider).
 
 ## 1.0.15
 
