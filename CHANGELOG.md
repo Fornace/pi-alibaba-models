@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1
+
+- Sidecar SSE parser splits frames on LF or CRLF blank lines, so CRLF streams no longer glue events and drop JSON.
+- An already-aborted input `AbortSignal` cancels `postSidecar` immediately instead of waiting out the timeout.
+- README Cloud auth matches the API-key provider (`$DASHSCOPE_API_KEY` / `{ type: "api_key", key }`), not the old OAuth-shaped registration.
+
 ## 1.3.0
 
 - **Leaner `alibaba_tools` prompt:** removes repeated guidance while making the cost and latency trade-offs explicit. Quick current-web lookups use `search`; page extraction and multi-source synthesis can go directly to the slower, costlier `research` action.

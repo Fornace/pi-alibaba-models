@@ -64,9 +64,9 @@ rm -f ~/.pi/agent/alibaba-config.json ~/.pi/agent/alibaba-plan-models.cache.json
 | Provider id    | Section in `/login`     | Auth shape | Use it for                                 |
 |----------------|-------------------------|------------|--------------------------------------------|
 | `alibaba-plan` | Plans                   | OAuth (paste token) | Model Studio Coding Plan subscription |
-| `alibaba-cloud`| API Keys (via OAuth UI) | OAuth (paste API key) | Pay-per-token DashScope API           |
+| `alibaba-cloud`| API Keys                | API key | Pay-per-token DashScope API           |
 
-Both are registered as `oauth`-shaped providers so they appear in `/login` and live in `~/.pi/agent/auth.json` under their respective keys. The Plan provider stores the chosen endpoints in the `refresh` field as JSON; the Cloud provider stores its domain in `~/.pi/agent/alibaba-config.json`.
+Plan is registered as an `oauth` provider (paste token in `/login`). Cloud is registered as an API-key provider (`apiKey: "$DASHSCOPE_API_KEY"`) and shows up under `/login → Use an API key`; credentials are stored as `{ type: "api_key", key }`. Older Cloud entries saved in OAuth shape are migrated to that API-key record. The Plan provider stores the chosen endpoints in the `refresh` field as JSON; the Cloud provider stores its domain in `~/.pi/agent/alibaba-config.json`.
 
 > **Cloud without `/login`:** the Cloud provider also reads the `DASHSCOPE_API_KEY` environment variable. If it's set, the extension fetches your live model catalog from it on startup — no `/login` needed. With **no** credential at all (no `/login`, no env var) the Cloud provider still shows up in `/login → Use an API key` via a single placeholder model, so you can sign in; your real catalog replaces it the moment a key is present.
 

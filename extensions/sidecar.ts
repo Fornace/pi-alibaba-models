@@ -285,7 +285,7 @@ export function applySidecarStreamEvent(parsed: SidecarParsed, event: unknown): 
 }
 
 export function consumeSseChunk(buffer: string, onEvent: (data: unknown) => void): string {
-  const parts = buffer.split("\n\n");
+  const parts = buffer.split(/\r?\n\r?\n/);
   const rest = parts.pop() ?? "";
   for (const block of parts) {
     const dataLines = block.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart());
@@ -390,6 +390,7 @@ export async function postSidecar(
   const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, req.timeoutMs);
   const onAbort = () => ctrl.abort();
   signal?.addEventListener("abort", onAbort);
+  if (signal?.aborted) ctrl.abort();
 
   const parsed: SidecarParsed = { text: "", sources: [], calls: [] };
   const beat = setInterval(() => onProgress?.(parsed, Date.now() - started), SIDECAR_HEARTBEAT_MS);

@@ -11,6 +11,7 @@ import {
   parseSidecarResponse,
   pickSidecarModel,
   pickSidecarTransport,
+  postSidecar,
   responsesToolsAllowed,
   sidecarTimeoutMessage,
   sidecarTimeoutMs,
@@ -164,11 +165,57 @@ describe("request + parse", () => {
     assert.deepEqual(parsed.calls, ["web_search: qwen"]);
   });
 
+  it("splits CRLF-delimited SSE frames instead of gluing them", () => {
+    const parsed = { text: "", sources: [], calls: [] };
+    const rest = consumeSseChunk(
+      'data: {"type":"response.output_text.delta","delta":"Hel"}\r\n\r\ndata: {"type":"response.output_text.delta","delta":"lo"}\r\n\r\npartial',
+      (ev) => applySidecarStreamEvent(parsed, ev),
+    );
+    assert.equal(rest, "partial");
+    assert.equal(parsed.text, "Hello");
+  });
+
   it("uses a longer research timeout and search-first timeout hint", () => {
     assert.equal(sidecarTimeoutMs("research", {}), 480_000);
     assert.equal(sidecarTimeoutMs("search", {}), 180_000);
     assert.equal(sidecarTimeoutMs("search", { ALIBABA_SIDECAR_TIMEOUT_MS: "12000" }), 12_000);
     assert.match(sidecarTimeoutMessage("research", 480_000, false), /action=search/);
     assert.match(formatSidecarProgress("search", 4000, { text: "", sources: [], calls: [] }), /4s/);
+  });
+});
+
+describe("postSidecar abort", () => {
+  it("fails immediately when the input signal is already aborted", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const signal = init?.signal;
+      if (signal?.aborted) {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        throw err;
+      }
+      return await new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        });
+      });
+    }) as typeof fetch;
+    try {
+      const ac = new AbortController();
+      ac.abort();
+      await assert.rejects(
+        () => postSidecar(
+          "dashscope-intl.aliyuncs.com",
+          "sk-test",
+          { url: "/responses", body: {}, timeoutMs: 200, action: "search" },
+          ac.signal,
+        ),
+        /DashScope sidecar aborted/,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
