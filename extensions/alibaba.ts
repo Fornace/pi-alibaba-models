@@ -2,6 +2,17 @@ import type { ExtensionAPI, ProviderModelConfig, ExtensionCommandContext } from 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  ALIBABA_TOOLS_PARAMETERS,
+  buildSidecarRequest,
+  dashScopeErrorMessage,
+  formatSidecarResult,
+  parseSidecarResponse,
+  pickSidecarModel,
+  postSidecar,
+  type SidecarAction,
+  type SidecarStrategy,
+} from "./sidecar.ts";
 
 // ── Paths ─────────────────────────────────────────────────────────────
 const HOME_DIR = path.join(os.homedir(), ".pi", "agent");
@@ -58,6 +69,12 @@ interface AlibabaConfig {
   // account is authorized to call (GET /api/v1/models/permissions) whenever
   // that endpoint is reachable. Set to false to always show the full catalog.
   cloudAuthorizedOnly?: boolean;
+  // Opt-in Pi tool `alibaba_tools`: a sidecar POST to DashScope built-in
+  // tools (web_search / extractor / interpreter). Off by default so it
+  // does not inflate every session or bill search on DeepSeek/Kimi/GLM.
+  cloudSidecarTools?: boolean;
+  // Optional Cloud model id for the sidecar (Qwen only). Empty = pick from catalog.
+  cloudSidecarModel?: string;
 }
 
 const readJSON = <T>(p: string, fallback: T): T => {
@@ -983,6 +1000,7 @@ export default async function (pi: ExtensionAPI) {
         "Plan — Change Endpoints",
         "Cloud — Change Domain",
         "Cloud — Change API Format",
+        "Cloud — DashScope built-in tools",
         "Rate limits (Cloud)",
         "Cloud — Authorized-only Filter",
         "Context Window — Override",
@@ -1015,6 +1033,7 @@ export default async function (pi: ExtensionAPI) {
           `Cloud: ${cloudCred ? "logged in" : (process.env.DASHSCOPE_API_KEY ? "via $DASHSCOPE_API_KEY" : "not logged in")}`,
           `       Domain:    ${cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN}`,
           `       Format:    ${cfg.cloudApiFormat || "anthropic-messages"}`,
+          `       Sidecar:   ${cfg.cloudSidecarTools ? `on (${cfg.cloudSidecarModel || "auto Qwen"})` : "off"}`,
           `       Auth-only: ${cfg.cloudAuthorizedOnly === false ? "off" : "on (when endpoint available)"}${cloudCache?.authorizedOnly ? " — active (filtered list)" : ""}`,
           `       Models:    ${cloudDefs.length} (${cloudState})`,
         ];
@@ -1140,6 +1159,38 @@ export default async function (pi: ExtensionAPI) {
             : "openai-completions";
         saveConfig(cfg);
         ctx.ui.notify(`Cloud format: ${cfg.cloudApiFormat}`, "info");
+        await ctx.reload();
+        return;
+      }
+
+      if (choice === "Cloud — DashScope built-in tools") {
+        const sel = await ctx.ui.select("alibaba_tools sidecar (Cloud Qwen only, billed separately):", [
+          cfg.cloudSidecarTools ? "On (keep enabled)" : "Enable",
+          "Disable",
+          "Enable and set sidecar model…",
+        ]);
+        if (!sel) return;
+        if (sel === "Disable") {
+          cfg.cloudSidecarTools = false;
+          saveConfig(cfg);
+          ctx.ui.notify("alibaba_tools disabled. Reloading…", "info");
+          await ctx.reload();
+          return;
+        }
+        cfg.cloudSidecarTools = true;
+        if (sel.startsWith("Enable and set")) {
+          const id = (await ctx.ui.input(
+            `Sidecar Qwen model id (blank = auto; currently ${cfg.cloudSidecarModel || "auto"}):`,
+          ))?.trim();
+          if (id) cfg.cloudSidecarModel = id;
+          else delete cfg.cloudSidecarModel;
+        }
+        saveConfig(cfg);
+        if (!readCloudKey()) {
+          ctx.ui.notify("alibaba_tools enabled, but no Cloud key yet. /login → Alibaba Cloud or set $DASHSCOPE_API_KEY, then retry.", "warning");
+        } else {
+          ctx.ui.notify(`alibaba_tools enabled (${cfg.cloudSidecarModel || "auto Qwen"}). Reloading…`, "info");
+        }
         await ctx.reload();
         return;
       }
@@ -1274,4 +1325,81 @@ export default async function (pi: ExtensionAPI) {
       }
     },
   });
+
+  if (config.cloudSidecarTools) {
+    pi.registerTool({
+      name: "alibaba_tools",
+      label: "Alibaba tools",
+      description:
+        "DashScope built-in tools via a sidecar Cloud request (not the current chat format). " +
+        "Actions: research (web_search + web_extractor + code_interpreter), search, code, image. " +
+        "Qwen only; billed on the Cloud key. Do not use for local files or shell.",
+      promptSnippet: "alibaba_tools: live DashScope web/pages/code-sandbox/image-search (sidecar; Cloud Qwen).",
+      promptGuidelines: [
+        "Use alibaba_tools for live docs, news, weather, or fetching a URL; not for repo files or bash.",
+        "Prefer action=research unless you only need a quick fact (search), sandbox math (code), or pictures (image).",
+        "Skip alibaba_tools when another web-search tool already covers the task.",
+      ],
+      parameters: ALIBABA_TOOLS_PARAMETERS,
+      executionMode: "sequential",
+      async execute(_toolCallId, rawParams: { action?: string; task?: string; strategy?: SidecarStrategy }, signal?: AbortSignal) {
+        const params = rawParams as { action?: string; task?: string; strategy?: SidecarStrategy };
+        const action = String(params.action || "") as SidecarAction;
+        const task = typeof params.task === "string" ? params.task.trim() : "";
+        const strategy = params.strategy;
+        if (!task) {
+          return { content: [{ type: "text", text: "alibaba_tools requires a non-empty task." }], details: { error: true } };
+        }
+        if (!["research", "search", "code", "image"].includes(action)) {
+          return { content: [{ type: "text", text: `Unknown action "${action}". Use research, search, code, or image.` }], details: { error: true } };
+        }
+        const key = readCloudKey();
+        if (!key) {
+          return {
+            content: [{ type: "text", text: "No Cloud API key. Run /login → Alibaba Cloud (API Key) or set $DASHSCOPE_API_KEY." }],
+            details: { error: true },
+          };
+        }
+        const live = loadConfig();
+        const domain = live.cloudDomain || DEFAULT_CLOUD_DOMAIN;
+        const picked = pickSidecarModel({
+          preferred: live.cloudSidecarModel,
+          catalogIds: cloudDefs.map((m) => m.id),
+          action,
+        });
+        if ("error" in picked) {
+          return { content: [{ type: "text", text: picked.error }], details: { error: true } };
+        }
+        const req = buildSidecarRequest({
+          model: picked.id,
+          transport: picked.transport,
+          action,
+          task,
+          strategy,
+        });
+        try {
+          const res = await postSidecar(domain, key, req, signal);
+          if (!res.ok) {
+            return {
+              content: [{ type: "text", text: dashScopeErrorMessage(res.status, res.json) }],
+              details: { error: true, status: res.status, model: picked.id, transport: picked.transport },
+            };
+          }
+          const parsed = parseSidecarResponse(res.json);
+          return {
+            content: [{ type: "text", text: formatSidecarResult(parsed) }],
+            details: {
+              action,
+              model: picked.id,
+              transport: picked.transport,
+              calls: parsed.calls,
+              sourceCount: parsed.sources.length,
+            },
+          };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: e?.message || String(e) }], details: { error: true } };
+        }
+      },
+    } as Parameters<ExtensionAPI["registerTool"]>[0]);
+  }
 }

@@ -8,6 +8,7 @@ The complete [`pi`](https://github.com/badlogic/pi-mono) extension for Alibaba's
 - **Three API Shapes**: Anthropic-compatible (`/v1/messages`) by default; OpenAI Chat Completions (`/compatible-mode/v1`) auto-selected for DeepSeek and selectable per-Cloud via `/alibaba`; OpenAI **Responses** (`/compatible-mode/v1/responses`) as a third Cloud format.
 - **Five+ Regions**: International (`dashscope-intl.aliyuncs.com`), China, US-Virginia, Hong Kong, plus Alibaba's recommended **workspace domains** `{WorkspaceId}.{region}.maas.aliyuncs.com` for Beijing / Singapore / Tokyo / Frankfurt / US — switch with `/alibaba`, no re-login needed.
 - **Native Reasoning**: First-class thinking-level support for every reasoning-capable model, including `reasoning.effort` on Responses and Completions effort maps for Qwen 3.8 / GLM-5.x / DeepSeek V4.
+- **DashScope sidecar tools** (opt-in): one Pi tool, `alibaba_tools`, for live web search, page extract, code interpreter, and image search. Off by default. Does not change the chat API format.
 - **Vision Capable**: Image input automatically enabled for VL models, Qwen 3.8, Qwen 3.x Plus variants, and Kimi.
 - **Live Catalog**: Cloud prefers Alibaba's native `GET /api/v1/models` (real context windows, max output, capability tags, pricing) and falls back to compatible-mode `/models`. Plan still uses the live `/compatible-mode/v1/models` list. New models appear as Alibaba ships them — no extension update needed.
 
@@ -79,7 +80,7 @@ Both are registered as `oauth`-shaped providers so they appear in `/login` and l
 - Anthropic-compat: `https://dashscope-intl.aliyuncs.com/apps/anthropic`
 - OpenAI-compat:    `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` (Chat Completions **and** Responses)
 
-> **OpenAI Responses API** (`/compatible-mode/v1/responses`): Alibaba's newest OpenAI-compatible surface, with `reasoning.effort` thinking levels. Select it per-Cloud via `/alibaba → Cloud — Change API Format → OpenAI Responses`. Built-in DashScope tools (web search, code interpreter, web extractor) are not auto-injected — pi still sends its own agent tools. DeepSeek stays on Chat Completions when the Cloud format is Anthropic (that path hangs); on Responses it follows the selected format (Beijing/Singapore per Alibaba's docs).
+> **OpenAI Responses API** (`/compatible-mode/v1/responses`): Alibaba's newest OpenAI-compatible surface, with `reasoning.effort` thinking levels. Select it per-Cloud via `/alibaba → Cloud — Change API Format → OpenAI Responses`. Built-in DashScope tools are **not** mixed into that chat stream (pi still sends its own agent tools). Enable them separately with `/alibaba → Cloud — DashScope built-in tools`: that registers `alibaba_tools`, which makes its own Cloud request (Responses, or Completions `enable_search` for a cheap search) using a Qwen model. DeepSeek stays on Chat Completions when the Cloud format is Anthropic (that path hangs); on Responses it follows the selected format (Beijing/Singapore per Alibaba's docs).
 
 ## Key prefix reference
 
@@ -137,6 +138,7 @@ The Cloud provider prefers Alibaba's native `GET /api/v1/models` (paginated, tex
 - **Model Availability (404s)**: When `GET /api/v1/models/permissions` is reachable, the picker shows the catalog your account is authorized to call. Toggle with `/alibaba → Cloud — Authorized-only Filter`. On other domains the advertised catalog is shown and a model you can't access still errors only when you send a message.
 - **API Wrapper Quirks**: Alibaba's native Anthropic compatibility layer can occasionally be strict or quirky with complex parallel tool calls. If you experience systemic parsing errors on DashScope, switch Cloud API format to "OpenAI Chat Completions" or "OpenAI Responses".
 - **Responses API**: not every model supports every built-in DashScope tool, and `xhigh`/`max` effort are documented for Beijing/Singapore. If a model errors out, switch back to Chat Completions or Anthropic for that session.
+- **`alibaba_tools`**: Cloud key required (`/login` or `$DASHSCOPE_API_KEY`). Qwen only — 3.7 Max / 3.6 Plus+ search is Responses-only. Completions search does not return source URLs; `research` on Responses does. Search usage is billed on the sidecar call, not on the coding-agent turn.
 - **Output budget vs. thinking budget**: On the Anthropic path, `max_tokens` is a **total** budget shared between thinking and the final answer. pi splits the card's `maxTokens` accordingly, so a card value of 8192 leaves only 8192 − 7168 = **1024 tokens** for the actual answer at high thinking — enough to truncate large tool calls (e.g. big `write`/`edit` content) mid-arguments. Reasoning models therefore report `maxTokens: 32768` (the verified universal ceiling — non-reasoning `qwen-plus` rejects 65536 with `Range of max_tokens should be [1, 32768]`), which yields a 16384-token answer budget at high thinking. Non-reasoning models keep 8192: pi sends it straight as the output cap, so there is no squeeze to fix. Completions and Responses keep the catalog's larger output ceilings.
 - **Dynamic Caching**: Model lists are cached for 4 hours. If a new model drops and you don't see it, run `/alibaba` -> `Refresh model lists`.
 - **Inferred Context Windows**: Compatible-mode `/v1/models` returns only ids and names, so context windows are inferred from the model id unless native `/api/v1/models` supplied a real value. If a brand-new model shows the wrong size, fix it yourself with `/alibaba → Context Window — Override` (per model, or `*` for all) — no extension update needed.
@@ -152,10 +154,20 @@ The Cloud provider prefers Alibaba's native `GET /api/v1/models` (paginated, tex
 | Plan — Change Endpoints      | Override OpenAI / Anthropic base URLs                                    |
 | Cloud — Change Domain        | International / China / US / HK / workspace domains / Custom             |
 | Cloud — Change API Format    | Anthropic Messages / OpenAI Chat Completions / OpenAI Responses          |
+| Cloud — DashScope built-in tools | Opt-in `alibaba_tools` sidecar (Qwen; research/search/code/image)   |
 | Rate limits (Cloud)          | Show per-model rate/usage quotas (`/api/v1/models/limits`)               |
 | Cloud — Authorized-only Filter | Toggle hiding catalog models the account isn't authorized to call      |
 | Context Window — Override    | Set the context-window shown on a model's card (per model, or `*` for all) |
 | Reset all                    | Wipe all Alibaba state (config, both auth entries, plan-models cache)    |
+
+Enable `alibaba_tools`, then ask the agent for live docs or news. Typical calls:
+
+```text
+alibaba_tools({ action: "research", task: "What changed in DashScope web_search this week?" })
+alibaba_tools({ action: "search", task: "Hangzhou weather tomorrow", strategy: "turbo" })
+```
+
+`research` uses Responses (`web_search` + `web_extractor` + `code_interpreter`). `search` uses Responses when the sidecar Qwen supports it, otherwise Completions `enable_search`. Chat format (Anthropic by default) is unchanged.
 
 ## Troubleshooting
 
@@ -164,6 +176,7 @@ The Cloud provider prefers Alibaba's native `GET /api/v1/models` (paginated, tex
 - **DeepSeek hangs / times out** → make sure you're on the latest version of this extension; it forces DeepSeek to OpenAI-compat. If you customised plan endpoints, verify the OpenAI URL ends in `/compatible-mode/v1`.
 - **Plan picker shows models that 404 at request time** → your subscription tier may not include every advertised model. The picker shows whatever upstream advertises; the API tells you "model_not_found" only when you actually call it.
 - **`/alibaba` command doesn't appear** → `pi list` should show `pi-alibaba-models` (or whatever source you installed from) under "User packages". If absent, run `pi install pi-alibaba-models` again and restart `pi`.
+- **`alibaba_tools` missing** → it is off by default. `/alibaba → Cloud — DashScope built-in tools → Enable`, then `/reload` or restart. Needs a Cloud key.
 
 ## Files
 

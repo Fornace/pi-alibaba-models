@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0
+
+- **`alibaba_tools` sidecar** (opt-in): `/alibaba → Cloud — DashScope built-in tools` registers one Pi tool that POSTs its own Cloud Completions/Responses request. Actions: `research` (web_search + web_extractor + code_interpreter), `search`, `code`, `image`. Qwen-only allowlist; DeepSeek/Kimi/GLM/MiniMax are rejected. Built-in tool events stay inside the plugin — they are not mixed into pi's agent stream or the current chat format (Anthropic default included).
+- Tests for allowlists, model picking, request bodies, and Responses/Completions result parsing.
+
 ## 1.1.0
 
 - **OpenAI Responses API** for Cloud: `/alibaba → Cloud — Change API Format → OpenAI Responses` sets `api: "openai-responses"` on `https://{domain}/compatible-mode/v1` (pi talks to `/responses`). Thinking maps onto Bailian's `reasoning.effort` (`off→none`, plus minimal/low/medium/high/xhigh/max). DeepSeek still falls back to Chat Completions when the Cloud format is Anthropic.
