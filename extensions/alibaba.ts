@@ -6,8 +6,8 @@ import {
   ALIBABA_TOOLS_PARAMETERS,
   buildSidecarRequest,
   dashScopeErrorMessage,
+  formatSidecarProgress,
   formatSidecarResult,
-  parseSidecarResponse,
   pickSidecarModel,
   postSidecar,
   type SidecarAction,
@@ -1331,34 +1331,30 @@ export default async function (pi: ExtensionAPI) {
       name: "alibaba_tools",
       label: "Alibaba tools",
       description:
-        "DashScope built-in tools via a sidecar Cloud request (not the current chat format). " +
-        "Actions: research (web_search + web_extractor + code_interpreter), search, code, image. " +
-        "Qwen only; billed on the Cloud key. Do not use for local files or shell.",
-      promptSnippet: "alibaba_tools: live DashScope web/pages/code-sandbox/image-search (sidecar; Cloud Qwen).",
+        "DashScope live web via a sidecar Cloud request (not the current chat format). " +
+        "Prefer action=search for news/docs. Use research only if search was too thin. " +
+        "Also: code (sandbox), image (picture search). Qwen only. Not a shell — use bash for local commands.",
+      promptSnippet: "alibaba_tools: live DashScope search (default), optional research/code/image. Sidecar Cloud Qwen.",
       promptGuidelines: [
         "Use alibaba_tools for live docs, news, weather, or fetching a URL; not for repo files or bash.",
-        "Prefer action=research unless you only need a quick fact (search), sandbox math (code), or pictures (image).",
+        "Default to action=search. Use research only after search is too thin and you need page extract or multi-source synthesis.",
+        "Use code for sandbox math; image for pictures. Never pass a shell command to alibaba_tools.",
         "Skip alibaba_tools when another web-search tool already covers the task.",
       ],
       parameters: ALIBABA_TOOLS_PARAMETERS,
-      executionMode: "sequential",
-      async execute(_toolCallId, rawParams: { action?: string; task?: string; strategy?: SidecarStrategy }, signal?: AbortSignal) {
+      executionMode: "parallel",
+      async execute(_toolCallId, rawParams: { action?: string; task?: string; strategy?: SidecarStrategy }, signal?: AbortSignal, onUpdate?: (partial: { content: { type: "text"; text: string }[]; details?: unknown }) => void) {
         const params = rawParams as { action?: string; task?: string; strategy?: SidecarStrategy };
-        const action = String(params.action || "") as SidecarAction;
+        const action = String(params.action || "search") as SidecarAction;
         const task = typeof params.task === "string" ? params.task.trim() : "";
         const strategy = params.strategy;
-        if (!task) {
-          return { content: [{ type: "text", text: "alibaba_tools requires a non-empty task." }], details: { error: true } };
-        }
+        if (!task) throw new Error("alibaba_tools requires a non-empty task.");
         if (!["research", "search", "code", "image"].includes(action)) {
-          return { content: [{ type: "text", text: `Unknown action "${action}". Use research, search, code, or image.` }], details: { error: true } };
+          throw new Error(`Unknown action "${action}". Use search, research, code, or image.`);
         }
         const key = readCloudKey();
         if (!key) {
-          return {
-            content: [{ type: "text", text: "No Cloud API key. Run /login → Alibaba Cloud (API Key) or set $DASHSCOPE_API_KEY." }],
-            details: { error: true },
-          };
+          throw new Error("No Cloud API key. Run /login → Alibaba Cloud (API Key) or set $DASHSCOPE_API_KEY.");
         }
         const live = loadConfig();
         const domain = live.cloudDomain || DEFAULT_CLOUD_DOMAIN;
@@ -1367,9 +1363,7 @@ export default async function (pi: ExtensionAPI) {
           catalogIds: cloudDefs.map((m) => m.id),
           action,
         });
-        if ("error" in picked) {
-          return { content: [{ type: "text", text: picked.error }], details: { error: true } };
-        }
+        if ("error" in picked) throw new Error(picked.error);
         const req = buildSidecarRequest({
           model: picked.id,
           transport: picked.transport,
@@ -1377,28 +1371,27 @@ export default async function (pi: ExtensionAPI) {
           task,
           strategy,
         });
-        try {
-          const res = await postSidecar(domain, key, req, signal);
-          if (!res.ok) {
-            return {
-              content: [{ type: "text", text: dashScopeErrorMessage(res.status, res.json) }],
-              details: { error: true, status: res.status, model: picked.id, transport: picked.transport },
-            };
-          }
-          const parsed = parseSidecarResponse(res.json);
-          return {
-            content: [{ type: "text", text: formatSidecarResult(parsed) }],
-            details: {
-              action,
-              model: picked.id,
-              transport: picked.transport,
-              calls: parsed.calls,
-              sourceCount: parsed.sources.length,
-            },
-          };
-        } catch (e: any) {
-          return { content: [{ type: "text", text: e?.message || String(e) }], details: { error: true } };
-        }
+        onUpdate?.({
+          content: [{ type: "text", text: formatSidecarProgress(action, 0, { text: "", sources: [], calls: [] }) }],
+          details: { action, model: picked.id, transport: picked.transport, partial: true },
+        });
+        const res = await postSidecar(domain, key, req, signal, (parsed, elapsedMs) => {
+          onUpdate?.({
+            content: [{ type: "text", text: formatSidecarProgress(action, elapsedMs, parsed) }],
+            details: { action, model: picked.id, transport: picked.transport, partial: true, calls: parsed.calls },
+          });
+        });
+        if (!res.ok) throw new Error(dashScopeErrorMessage(res.status, res.json));
+        return {
+          content: [{ type: "text", text: formatSidecarResult(res.parsed) }],
+          details: {
+            action,
+            model: picked.id,
+            transport: picked.transport,
+            calls: res.parsed.calls,
+            sourceCount: res.parsed.sources.length,
+          },
+        };
       },
     } as Parameters<ExtensionAPI["registerTool"]>[0]);
   }

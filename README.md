@@ -138,7 +138,7 @@ The Cloud provider prefers Alibaba's native `GET /api/v1/models` (paginated, tex
 - **Model Availability (404s)**: When `GET /api/v1/models/permissions` is reachable, the picker shows the catalog your account is authorized to call. Toggle with `/alibaba → Cloud — Authorized-only Filter`. On other domains the advertised catalog is shown and a model you can't access still errors only when you send a message.
 - **API Wrapper Quirks**: Alibaba's native Anthropic compatibility layer can occasionally be strict or quirky with complex parallel tool calls. If you experience systemic parsing errors on DashScope, switch Cloud API format to "OpenAI Chat Completions" or "OpenAI Responses".
 - **Responses API**: not every model supports every built-in DashScope tool, and `xhigh`/`max` effort are documented for Beijing/Singapore. If a model errors out, switch back to Chat Completions or Anthropic for that session.
-- **`alibaba_tools`**: Cloud key required (`/login` or `$DASHSCOPE_API_KEY`). Qwen only — 3.7 Max / 3.6 Plus+ search is Responses-only. Completions search does not return source URLs; `research` on Responses does. Search usage is billed on the sidecar call, not on the coding-agent turn.
+- **`alibaba_tools`**: Cloud key required (`/login` or `$DASHSCOPE_API_KEY`). Qwen only — 3.7 Max / 3.6 Plus+ search is Responses-only. Completions search does not return source URLs; Responses search/research can. Auto sidecar model prefers Flash/Plus over Max. Search usage is billed on the sidecar call. A silent hang should not happen: the tool card streams elapsed time and built-in calls. If it still times out, narrow the task or raise `ALIBABA_SIDECAR_TIMEOUT_MS`.
 - **Output budget vs. thinking budget**: On the Anthropic path, `max_tokens` is a **total** budget shared between thinking and the final answer. pi splits the card's `maxTokens` accordingly, so a card value of 8192 leaves only 8192 − 7168 = **1024 tokens** for the actual answer at high thinking — enough to truncate large tool calls (e.g. big `write`/`edit` content) mid-arguments. Reasoning models therefore report `maxTokens: 32768` (the verified universal ceiling — non-reasoning `qwen-plus` rejects 65536 with `Range of max_tokens should be [1, 32768]`), which yields a 16384-token answer budget at high thinking. Non-reasoning models keep 8192: pi sends it straight as the output cap, so there is no squeeze to fix. Completions and Responses keep the catalog's larger output ceilings.
 - **Dynamic Caching**: Model lists are cached for 4 hours. If a new model drops and you don't see it, run `/alibaba` -> `Refresh model lists`.
 - **Inferred Context Windows**: Compatible-mode `/v1/models` returns only ids and names, so context windows are inferred from the model id unless native `/api/v1/models` supplied a real value. If a brand-new model shows the wrong size, fix it yourself with `/alibaba → Context Window — Override` (per model, or `*` for all) — no extension update needed.
@@ -163,11 +163,11 @@ The Cloud provider prefers Alibaba's native `GET /api/v1/models` (paginated, tex
 Enable `alibaba_tools`, then ask the agent for live docs or news. Typical calls:
 
 ```text
+alibaba_tools({ action: "search", task: "Hangzhou weather tomorrow" })
 alibaba_tools({ action: "research", task: "What changed in DashScope web_search this week?" })
-alibaba_tools({ action: "search", task: "Hangzhou weather tomorrow", strategy: "turbo" })
 ```
 
-`research` uses Responses (`web_search` + `web_extractor` + `code_interpreter`). `search` uses Responses when the sidecar Qwen supports it, otherwise Completions `enable_search`. Chat format (Anthropic by default) is unchanged.
+Default to **`search`**. `research` (search + extractor + interpreter, thinking on) is slower and only worth it when search was too thin. The sidecar **streams** into the tool card (heartbeat every 4s) so a long call is not a silent hang. Limits: 3 min for search/code/image, 8 min for research — override with `ALIBABA_SIDECAR_TIMEOUT_MS`. Chat format is unchanged.
 
 ## Troubleshooting
 

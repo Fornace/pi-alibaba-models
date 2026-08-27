@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.1
+
+- **`alibaba_tools` is search-first.** Guidelines and schema tell the model to use `search` for live facts; `research` only if that was too thin.
+- **Streaming sidecar:** DashScope Responses/Completions are requested with `stream: true`. Progress (elapsed time, search/extract calls, partial text) is pushed through pi's `onUpdate` so the TUI is not a silent hang. Failures **throw** so the transcript marks `isError`.
+- **Timeouts:** `research` 8 min, others 3 min (was 3 min / 90 s). Override with `ALIBABA_SIDECAR_TIMEOUT_MS`. Timeout text suggests `search` instead of `research`.
+- Auto sidecar model prefers Flash/Plus over Max when the catalog has both. Independent `code`/`image` calls may run in parallel.
+
 ## 1.2.0
 
 - **`alibaba_tools` sidecar** (opt-in): `/alibaba → Cloud — DashScope built-in tools` registers one Pi tool that POSTs its own Cloud Completions/Responses request. Actions: `research` (web_search + web_extractor + code_interpreter), `search`, `code`, `image`. Qwen-only allowlist; DeepSeek/Kimi/GLM/MiniMax are rejected. Built-in tool events stay inside the plugin — they are not mixed into pi's agent stream or the current chat format (Anthropic default included).

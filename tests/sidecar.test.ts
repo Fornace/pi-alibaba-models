@@ -1,14 +1,19 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  applySidecarStreamEvent,
   buildSidecarRequest,
   completionsSearchAllowed,
+  consumeSseChunk,
   dashScopeErrorMessage,
+  formatSidecarProgress,
   formatSidecarResult,
   parseSidecarResponse,
   pickSidecarModel,
   pickSidecarTransport,
   responsesToolsAllowed,
+  sidecarTimeoutMessage,
+  sidecarTimeoutMs,
   sidecarToolsFor,
   SIDECAR_RESULT_CHAR_LIMIT,
 } from "../extensions/sidecar.ts";
@@ -41,6 +46,14 @@ describe("pickSidecarModel", () => {
       action: "research",
     });
     assert.deepEqual(picked, { id: "qwen3.7-plus", transport: "responses" });
+  });
+
+  it("prefers Flash/Plus over Max for search so the sidecar is not a second flagship bill", () => {
+    const picked = pickSidecarModel({
+      catalogIds: ["qwen3.8-max", "qwen-plus", "glm-5.2"],
+      action: "search",
+    });
+    assert.deepEqual(picked, { id: "qwen-plus", transport: "responses" });
   });
 
   it("picks Responses for qwen-plus search (Completions is the fallback path)", () => {
@@ -77,6 +90,8 @@ describe("request + parse", () => {
       task: "Hangzhou weather",
     });
     assert.equal(req.url, "/responses");
+    assert.equal(req.body.stream, true);
+    assert.equal(req.timeoutMs, 480_000);
     assert.equal(req.body.enable_thinking, true);
     assert.deepEqual(req.body.tools, sidecarToolsFor("research"));
   });
@@ -90,6 +105,8 @@ describe("request + parse", () => {
       strategy: "turbo",
     });
     assert.equal(req.url, "/chat/completions");
+    assert.equal(req.body.stream, true);
+    assert.equal(req.timeoutMs, 180_000);
     assert.equal(req.body.enable_search, true);
     assert.deepEqual(req.body.search_options, { search_strategy: "turbo" });
   });
@@ -134,5 +151,24 @@ describe("request + parse", () => {
     const formatted = formatSidecarResult({ text: "x".repeat(SIDECAR_RESULT_CHAR_LIMIT + 10), sources: [], calls: [] });
     assert.ok(formatted.length < SIDECAR_RESULT_CHAR_LIMIT + 80);
     assert.match(formatted, /truncated sidecar output/);
+  });
+
+  it("accumulates SSE text deltas and tool-call items", () => {
+    const parsed = { text: "", sources: [], calls: [] };
+    const rest = consumeSseChunk(
+      'event: x\ndata: {"type":"response.output_text.delta","delta":"Hel"}\n\ndata: {"type":"response.output_item.added","item":{"type":"web_search_call","action":{"query":"qwen"}}}\n\npartial',
+      (ev) => applySidecarStreamEvent(parsed, ev),
+    );
+    assert.equal(rest, "partial");
+    assert.equal(parsed.text, "Hel");
+    assert.deepEqual(parsed.calls, ["web_search: qwen"]);
+  });
+
+  it("uses a longer research timeout and search-first timeout hint", () => {
+    assert.equal(sidecarTimeoutMs("research", {}), 480_000);
+    assert.equal(sidecarTimeoutMs("search", {}), 180_000);
+    assert.equal(sidecarTimeoutMs("search", { ALIBABA_SIDECAR_TIMEOUT_MS: "12000" }), 12_000);
+    assert.match(sidecarTimeoutMessage("research", 480_000, false), /action=search/);
+    assert.match(formatSidecarProgress("search", 4000, { text: "", sources: [], calls: [] }), /4s/);
   });
 });
