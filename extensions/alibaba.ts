@@ -12,6 +12,19 @@ const CLOUD_CACHE_PATH = path.join(HOME_DIR, "alibaba-cloud-models.cache.json");
 
 const MODELS_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
 
+// Reasoning models: hide "off" (same as before) and opt in to high/max.
+// Intermediate pi levels are explicitly unsupported — do not alias them
+// onto "high" the way DeepSeek's native map does.
+const REASONING_THINKING_LEVEL_MAP = {
+  off: null,
+  minimal: null,
+  low: null,
+  medium: null,
+  high: "high",
+  xhigh: null,
+  max: "max",
+} as const;
+
 const DEFAULT_PLAN_OPENAI = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 const DEFAULT_PLAN_ANTHROPIC = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic";
 const DEFAULT_CLOUD_DOMAIN = "dashscope-intl.aliyuncs.com";
@@ -186,13 +199,14 @@ function resolvePlanEndpoints(credentials?: { access?: string; refresh?: string 
   };
 }
 
-function buildPlanModels(defs: PlanModelDef[], openaiUrl: string, anthropicUrl: string): ProviderModelConfig[] {
+export function buildPlanModels(defs: PlanModelDef[], openaiUrl: string, anthropicUrl: string): ProviderModelConfig[] {
   return defs.map((m) => {
     const useOpenAI = !!m.openaiOnly || /deepseek/i.test(m.id);
     return {
       id: m.id, name: m.name, reasoning: m.reasoning, input: m.input,
-      contextWindow: m.contextWindow, maxTokens: m.maxTokens, compat: m.compat,
-      thinkingLevelMap: m.reasoning ? { off: null } : undefined,
+      contextWindow: m.contextWindow, maxTokens: m.maxTokens,
+      compat: useOpenAI ? { ...(m.compat ?? {}), supportsDeveloperRole: false } : m.compat,
+      thinkingLevelMap: m.reasoning ? { ...REASONING_THINKING_LEVEL_MAP } : undefined,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       baseUrl: useOpenAI ? openaiUrl : anthropicUrl,
       api: (useOpenAI ? "openai-completions" : "anthropic-messages") as "anthropic-messages" | "openai-completions",
@@ -239,14 +253,15 @@ async function fetchCloudModels(domain: string, apiKey: string, _force = false):
   } finally { clearTimeout(t); }
 }
 
-function buildCloudModels(models: ProviderModelConfig[], domain: string, fmt: string): ProviderModelConfig[] {
+export function buildCloudModels(models: ProviderModelConfig[], domain: string, fmt: string): ProviderModelConfig[] {
   return models.map((m) => {
     const useOpenAI = /deepseek/i.test(m.id) || fmt === "openai-completions";
     return {
       ...m,
-      thinkingLevelMap: m.reasoning ? { off: null } : undefined,
+      thinkingLevelMap: m.reasoning ? { ...REASONING_THINKING_LEVEL_MAP } : undefined,
       baseUrl: useOpenAI ? `https://${domain}/compatible-mode/v1` : `https://${domain}/apps/anthropic`,
       api: (useOpenAI ? "openai-completions" : "anthropic-messages") as "anthropic-messages" | "openai-completions",
+      compat: useOpenAI ? { ...(m.compat ?? {}), supportsDeveloperRole: false } : m.compat,
     };
   });
 }
@@ -288,27 +303,47 @@ const CLOUD_LOGIN_SEED: ProviderModelConfig[] = [{
 }];
 
 // ── Offline-resilient catalog loaders ────────────────────────────────
-// Live API is the source of truth. But a network failure must never take
-// the whole extension (and therefore pi, and the user's local models) down
-// with it. So: try live, fall back to the last-known-good on-disk cache,
-// warn, and never throw. Cache is an offline fallback only — when the API
-// is reachable, its response always wins and overwrites the cache.
+// The on-disk cache is both a fast path and a failure fallback:
+//   • fresh cache (< MODELS_CACHE_TTL_MS) and not `force` → serve it, skip
+//     the network. pi awaits this loader before registering providers, so
+//     an unconditional fetch put a cross-region round trip in front of
+//     every launch (and session_start used to do it again).
+//   • stale cache, missing cache, or `force` → fetch live; the response
+//     always wins and rewrites the cache. A network failure falls back to
+//     the stale cache, warns, and never throws.
 const cacheAgeMin = (fetchedAt: number) => Math.round((Date.now() - fetchedAt) / 60000);
+
+export const isCacheFresh = (fetchedAt?: number, now = Date.now()): boolean =>
+  typeof fetchedAt === "number" && Number.isFinite(fetchedAt) && now - fetchedAt < MODELS_CACHE_TTL_MS;
+
+function rehydratePlan(models: PlanModelDef[]): PlanModelDef[] {
+  const overrides = loadConfig().contextWindowOverrides;
+  return models.map((m) => ({
+    ...m,
+    contextWindow: inferContextWindow(m.id, overrides),
+    maxTokens: m.openaiOnly || /deepseek/i.test(m.id) ? 16384 : inferMaxTokens(m.id),
+  }));
+}
+
+function rehydrateCloud(models: ProviderModelConfig[]): ProviderModelConfig[] {
+  const overrides = loadConfig().contextWindowOverrides;
+  return models.map((m) => ({
+    ...m,
+    contextWindow: inferContextWindow(m.id, overrides),
+    maxTokens: inferMaxTokens(m.id),
+  }));
+}
 
 async function loadPlanDefs(force: boolean, credentials?: { access?: string; refresh?: string }): Promise<PlanModelDef[]> {
   if (!credentials?.access) return [];
+  const cache = readJSON<PlanCache | null>(PLAN_CACHE_PATH, null);
+  if (!force && cache?.models?.length && isCacheFresh(cache.fetchedAt)) return rehydratePlan(cache.models);
   try {
     return await fetchPlanModels(force, credentials);
   } catch (e: any) {
-    const cache = readJSON<PlanCache | null>(PLAN_CACHE_PATH, null);
     if (cache?.models?.length) {
       console.warn(`[alibaba] Plan catalog fetch failed (${e?.message || e}); using cached models (${cache.models.length}, ${cacheAgeMin(cache.fetchedAt)}m old).`);
-      // Recompute context windows to apply the latest inferContextWindow logic
-      const overrides = loadConfig().contextWindowOverrides;
-      return cache.models.map(m => ({
-        ...m,
-        contextWindow: inferContextWindow(m.id, overrides),
-      }));
+      return rehydratePlan(cache.models);
     }
     console.warn(`[alibaba] Plan catalog fetch failed (${e?.message || e}); no cache — Plan models unavailable until reconnected. Other providers still work.`);
     return [];
@@ -316,20 +351,15 @@ async function loadPlanDefs(force: boolean, credentials?: { access?: string; ref
 }
 
 async function loadCloudDefs(domain: string, apiKey: string, force: boolean): Promise<ProviderModelConfig[]> {
+  const cache = readJSON<CloudCache | null>(CLOUD_CACHE_PATH, null);
+  const usable = cache?.models?.length && cache.domain === domain ? cache : null;
+  if (!force && usable && isCacheFresh(usable.fetchedAt)) return rehydrateCloud(usable.models);
   try {
     return await fetchCloudModels(domain, apiKey, force);
   } catch (e: any) {
-    const cache = readJSON<CloudCache | null>(CLOUD_CACHE_PATH, null);
-    if (cache?.models?.length && cache.domain === domain) {
-      console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); using cached models (${cache.models.length}, ${cacheAgeMin(cache.fetchedAt)}m old).`);
-      // Recompute context windows and max tokens to apply the latest
-      // inference logic to stale caches
-      const overrides = loadConfig().contextWindowOverrides;
-      return cache.models.map(m => ({
-        ...m,
-        contextWindow: inferContextWindow(m.id, overrides),
-        maxTokens: inferMaxTokens(m.id),
-      }));
+    if (usable) {
+      console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); using cached models (${usable.models.length}, ${cacheAgeMin(usable.fetchedAt)}m old).`);
+      return rehydrateCloud(usable.models);
     }
     console.warn(`[alibaba] Cloud catalog fetch failed (${e?.message || e}); no cache — Cloud models unavailable until reconnected. Other providers still work.`);
     return [];
@@ -437,8 +467,12 @@ export default async function (pi: ExtensionAPI) {
   const cloudDomain = config.cloudDomain || DEFAULT_CLOUD_DOMAIN;
   const cloudFmt = config.cloudApiFormat || "anthropic-messages";
 
-  if (planCreds?.access) planDefs = await loadPlanDefs(true, planCreds);
-  if (cloudKey) cloudDefs = await loadCloudDefs(cloudDomain, cloudKey, true);
+  // Cache-first: pi awaits this factory before it registers providers, so
+  // forcing a live fetch here taxed every launch. session_start uses the
+  // same loaders with force=false; /alibaba → "Refresh model lists" still
+  // calls the fetchers directly.
+  if (planCreds?.access) planDefs = await loadPlanDefs(false, planCreds);
+  if (cloudKey) cloudDefs = await loadCloudDefs(cloudDomain, cloudKey, false);
   // Keep the Cloud provider visible in /login even with no models yet (issue #1).
   if (!cloudDefs.length) cloudDefs = CLOUD_LOGIN_SEED;
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.16
+
+- **Startup no longer blocks on a live catalog fetch.** A cache younger than 4 hours is served immediately; `session_start` and `/alibaba → Refresh model lists` still refresh when the cache is stale or when you ask. Fetch failures still fall back to the stale cache. Cached Plan entries now also recompute `maxTokens` (DeepSeek stays at 16384 on the OpenAI path).
+- **Thinking levels:** reasoning models expose `high` and `max` in the picker. Unused intermediate levels are marked unsupported instead of being aliased onto `"high"`.
+- **OpenAI-compat:** `supportsDeveloperRole: false` so pi sends the system prompt as `system` — Alibaba rejects the `developer` role.
+- Tests: deterministic `node:test` coverage for cache TTL, thinking-level maps, and the developer-role flag (no network, no provider).
+
 ## 1.0.15
 
 - **Fix: large tool calls no longer truncated on reasoning models.** Every Cloud model used to report a flat `maxTokens: 8192` (Plan non-DeepSeek models: 65536). On pi's Anthropic path, `max_tokens` is a total budget shared between thinking and the final answer, so with pi's high thinking budget (16384) the answer budget collapsed to 8192 − 7168 = **1024 tokens** — enough to cut big `write`/`edit` calls mid-arguments (the model never emitted the `path` field; the content string ended abruptly). Reasoning models now report `maxTokens: 32768` → answer budget 32768 − 16384 = **16384** at high thinking, on both providers (Plan non-DeepSeek included; DeepSeek keeps its 16384 OpenAI-path value). 32768 was verified empirically as the universal `max_tokens` ceiling on the Anthropic-compat endpoint (non-reasoning `qwen-plus` rejects 65536 with `Range of max_tokens should be [1, 32768]`; `qwen3.8-max`, `deepseek-v4-flash`, `glm-5.2` and `kimi-k2.7-code` all accept 32768), so it can never be rejected as out of range. Non-reasoning models keep 8192 (pi sends it straight as the output cap — no thinking squeeze).

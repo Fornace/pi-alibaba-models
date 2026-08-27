@@ -36,6 +36,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
     "prepublishOnly": "npm run build"
   },
   "files": [
