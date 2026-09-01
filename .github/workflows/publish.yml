@@ -35,7 +35,7 @@ jobs:
         run: npm install --global npm@11.16.0 && npm --version
 
       - name: Install
-        run: npm ci --ignore-scripts
+        run: npm install --no-audit --no-fund --ignore-scripts
 
       - name: Typecheck
         run: npm run typecheck
