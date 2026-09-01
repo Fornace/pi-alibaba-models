@@ -2,6 +2,7 @@ import type { ExtensionAPI, ProviderModelConfig, ExtensionCommandContext } from 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { removeCredential, getCredential, setCredential } from "./auth-compat.ts";
 
 // ── Paths ─────────────────────────────────────────────────────────────
 const HOME_DIR = path.join(os.homedir(), ".pi", "agent");
@@ -634,9 +635,10 @@ export default async function (pi: ExtensionAPI) {
 
       if (choice === "Re-login Plan") {
         if (!await ctx.ui.confirm("Wipe Plan credentials and re-login?", "Removes alibaba-plan from auth.json")) return;
-        // Use authStorage.remove() rather than fs.write — it persists AND updates pi's
-        // in-memory credential map, so /login's `• configured` label refreshes without restart.
-        ctx.modelRegistry.authStorage.remove("alibaba-plan");
+        // removeCredential() persists AND updates pi's in-memory credential map
+        // where the legacy sync store exists; on newer pi it rewrites auth.json and
+        // the ctx.reload() below refreshes pi's state.
+        await removeCredential(ctx, "alibaba-plan");
         ctx.ui.notify("Plan credentials wiped. Run /login → Alibaba Model Studio Coding Plan.", "info");
         await ctx.reload();
         return;
@@ -644,7 +646,7 @@ export default async function (pi: ExtensionAPI) {
 
       if (choice === "Re-login Cloud") {
         if (!await ctx.ui.confirm("Wipe Cloud credentials and re-login?", "Removes alibaba-cloud from auth.json")) return;
-        ctx.modelRegistry.authStorage.remove("alibaba-cloud");
+        await removeCredential(ctx, "alibaba-cloud");
         ctx.ui.notify("Cloud credentials wiped. Run /login → Use an API key → Alibaba Cloud (API Key).", "info");
         await ctx.reload();
         return;
@@ -659,9 +661,9 @@ export default async function (pi: ExtensionAPI) {
           // (which prefers credentials.refresh over config) picks up the new endpoints
           // for the existing logged-in session — otherwise the change only takes effect
           // after the user logs out + back in.
-          const currentPlan = ctx.modelRegistry.authStorage.get("alibaba-plan");
+          const currentPlan = getCredential(ctx, "alibaba-plan");
           if (currentPlan?.type === "oauth") {
-            ctx.modelRegistry.authStorage.set("alibaba-plan", {
+            setCredential(ctx, "alibaba-plan", {
               ...currentPlan,
               refresh: JSON.stringify({ openai: o, anthropic: a }),
             });
@@ -759,10 +761,10 @@ export default async function (pi: ExtensionAPI) {
           "Wipes config, both auth entries, plan-models cache, and any alibaba-* entries in settings.json (enabledModels + defaultProvider/defaultModel if alibaba). Run before `pi remove` for a clean uninstall.",
         )) return;
         for (const p of [CONFIG_PATH, PLAN_CACHE_PATH, CLOUD_CACHE_PATH]) { try { fs.unlinkSync(p); } catch {} }
-        // Use authStorage.remove() so pi's in-memory credential cache stays in sync —
-        // otherwise /login's "• configured" label persists until pi is restarted.
+        // removeCredential() keeps pi's in-memory credential cache in sync where the
+        // legacy sync store exists; on newer pi the ctx.reload() below handles it.
         for (const k of ["alibaba", "alibaba-plan", "alibaba-cloud", "alibaba-studio", "alibaba-token", "dashscope"]) {
-          ctx.modelRegistry.authStorage.remove(k);
+          await removeCredential(ctx, k);
         }
         // Also strip stale alibaba-* / dashscope-* model ids from settings.json enabledModels,
         // and clear defaultProvider/defaultModel if they reference alibaba (otherwise pi would
