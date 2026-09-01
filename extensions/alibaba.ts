@@ -69,12 +69,15 @@ const inferContextWindow = (id: string, overrides?: Record<string, number>): num
   const o = overrides?.[id] ?? overrides?.["*"];
   if (typeof o === "number" && o > 0) return o;
 
-  // Third-party models
+  // Third-party models (per Model Studio specs; August 2026 additions:
+  // Kimi K3 and MiniMax M3 ship 1M windows per the release notes).
   if (/^glm-?5\.2\b/i.test(id)) return 1048576;
   if (/^glm/i.test(id)) return 202752;
   if (/deepseek-?v4/i.test(id)) return 1048576;
   if (/^deepseek/i.test(id)) return 131072;
+  if (/kimi-k3|kimi-k[4-9]/i.test(id)) return 1048576;
   if (/kimi/i.test(id)) return 262144;
+  if (/minimax-?m3\b/i.test(id)) return 1048576;
   if (/minimax-?m2\.5/i.test(id)) return 196608;
   if (/minimax-?m2\.1/i.test(id)) return 204800;
   if (/minimax/i.test(id)) return 196608;

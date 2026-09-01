@@ -1,7 +1,7 @@
 {
   "name": "pi-alibaba-models",
-  "version": "1.0.14",
-  "description": "The complete Alibaba provider for pi — Plan subscription + Cloud pay-per-token, International + China endpoints, Anthropic + OpenAI shapes, native thinking levels. Qwen 3.7 Max, Qwen 3.7 Plus, Qwen 3.6 Max, Qwen 3.6 Plus, DeepSeek V4 Pro, Kimi K2.6, GLM-5, MiniMax M2.5.",
+  "version": "1.1.0",
+  "description": "The complete Alibaba provider for pi \u2014 Plan subscription + Cloud pay-per-token, International + China endpoints, Anthropic + OpenAI shapes, native thinking levels. Qwen 3.8 Max, Qwen 3.7/3.6, DeepSeek V4 Pro, Kimi K3, GLM-5, MiniMax M3.",
   "author": "Francesco Frapporti <effedue@gmail.com>",
   "license": "MIT",
   "type": "module",
@@ -36,7 +36,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "typecheck": "tsc --noEmit"
   },
   "files": [
     "extensions/**/*.ts",
