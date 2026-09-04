@@ -6,7 +6,7 @@ The complete [`pi`](https://github.com/badlogic/pi-mono) extension for Alibaba's
 
 - **Dual Provider Support**: Both the subscription-based Model Studio Coding Plan **and** the pay-per-token Alibaba Cloud (DashScope) — registered side by side, switch per chat from the model picker.
 - **Three API Shapes**: Anthropic-compatible (`/v1/messages`) by default; OpenAI Chat Completions (`/compatible-mode/v1`) auto-selected for DeepSeek and selectable per-Cloud via `/alibaba`; OpenAI **Responses** (`/compatible-mode/v1/responses`) as a third Cloud format.
-- **Five+ Regions**: International (`dashscope-intl.aliyuncs.com`), China, US-Virginia, Hong Kong, plus Alibaba's recommended **workspace domains** `{WorkspaceId}.{region}.maas.aliyuncs.com` for Beijing / Singapore / Tokyo / Frankfurt / US — switch with `/alibaba`, no re-login needed.
+- **Five+ Regions**: International (`dashscope-intl.aliyuncs.com`), China, US-Virginia, Hong Kong, plus Alibaba's recommended **workspace domains** `{WorkspaceId}.{region}.maas.aliyuncs.com` for Beijing / Singapore / Tokyo / Frankfurt / US — switch with `/alibaba`, no re-login needed. Shared regional domains are **auto-upgraded** to the matching workspace domain when the WorkspaceId is discoverable and the candidate passes a probe.
 - **Native Reasoning**: First-class thinking-level support for every reasoning-capable model, including `reasoning.effort` on Responses and Completions effort maps for Qwen 3.8 / GLM-5.x / DeepSeek V4.
 - **DashScope sidecar tools** (opt-in): one Pi tool, `alibaba_tools`, for live web search, page extract, code interpreter, and image search. Off by default. Does not change the chat API format.
 - **Vision Capable**: Image input automatically enabled for VL models, Qwen 3.8, Qwen 3.x Plus variants, and Kimi.
@@ -112,7 +112,19 @@ The login flow validates the prefix and offers to redirect you to the correct pr
 | US (workspace)        | —                                              | `{WorkspaceId}.us-east-1.maas.aliyuncs.com`    |
 | Custom                | paste both base URLs at login                  | paste domain at login                          |
 
-> Workspace domains are the ones Alibaba recommends (and they're required for Japan/Frankfurt). `/alibaba → Cloud — Change Domain` asks for your business-space ID and builds the host.
+> Workspace domains are the ones Alibaba recommends (and they're required for Japan/Frankfurt). `/alibaba → Cloud — Change Domain` asks for your business-space ID and builds the host — the ID discovered by the auto-upgrade pre-fills the prompt (blank input reuses it).
+
+### Workspace-domain auto-upgrade
+
+Although Alibaba's docs say the WorkspaceId is console-only, the key's workspace is discoverable: `GET /api/v1/models/limits` returns `workspace_id` on every quota row — even on the shared domains where the endpoint itself is undocumented. So on boot (and on `session_start`, which covers logging into Cloud mid-session), when the Cloud endpoint is one of the three shared regional domains (`dashscope.aliyuncs.com` → Beijing, `dashscope-intl.aliyuncs.com` → Singapore, `dashscope-us.aliyuncs.com` → US), the extension:
+
+1. reads the `workspace_id` bound to your key (cached value as fallback),
+2. probes `{WorkspaceId}.{region}.maas.aliyuncs.com` with a cheap catalog GET,
+3. **only if the probe succeeds**, saves it as the new Cloud domain and logs the switch.
+
+A failed probe changes nothing and retries at most once per 24h. Hong Kong, custom, and already-workspace domains are never touched. Picking a shared domain explicitly via `/alibaba → Cloud — Change Domain` counts as “stay here” and disables the auto-upgrade; manage it anytime via `/alibaba → Cloud — Auto workspace domain` (detect now / enable / disable). `/alibaba → Status` shows the current state (`Auto-WS`) and the discovered WorkspaceId.
+
+**Swapping the API key between runs:** once on a workspace domain, boot pays zero network — nothing re-validates the key automatically. A same-region swap is a non-event: DashScope authenticates the key, not the wsid↔key pairing (verified empirically — a workspace subdomain serves any valid key of the site). A key from another **site** (CN ↔ International ↔ US do not share keys) would 401 on requests; run `Detect & upgrade now` in that case — it verifies the current key against the configured domain and, when rejected, rediscovers the workspace across all shared domains (current region first) and switches. If no workspace is discoverable but a shared domain accepts the key, it **demotes** to that shared domain and disables the auto-upgrade (so it cannot flip back into the same failure); re-enable from the same menu later. There is deliberately **no boot-time fallback**: demotion requires positive probe evidence from an explicit menu action, never a transient network error at launch.
 
 ### Rate limits
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.0
+
+- **Workspace-domain auto-upgrade (Cloud):** on boot and `session_start`, when the Cloud endpoint is a shared regional domain (`dashscope.aliyuncs.com`, `dashscope-intl.aliyuncs.com`, `dashscope-us.aliyuncs.com`), the extension discovers the key's WorkspaceId from `GET /api/v1/models/limits` (returned even on shared domains, although the docs call the ID console-only), probes `{WorkspaceId}.{region}.maas.aliyuncs.com`, and switches the Cloud domain **only if the probe succeeds**. Failed probes change nothing and back off for 24h; Hong Kong, custom, and workspace domains are never touched. Explicitly picking a shared domain in `Cloud — Change Domain` opts out; the new `/alibaba → Cloud — Auto workspace domain` menu detects on demand and toggles the behavior; the discovered ID pre-fills the manual workspace-domain prompt; `Status` shows the new `Auto-WS` state. `Detect & upgrade now` also recovers a swapped key: it verifies the current key against the configured workspace domain and, when rejected (key from another site), rediscovers the workspace across all shared domains and switches — or, as a last resort, demotes to a shared domain that positively accepts the key (auto-upgrade then opts out so it cannot flip back). Boot never demotes: fallback requires an explicit menu action.
+
 ## 1.3.1
 
 - Sidecar SSE parser splits frames on LF or CRLF blank lines, so CRLF streams no longer glue events and drop JSON.

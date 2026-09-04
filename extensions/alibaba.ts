@@ -75,6 +75,18 @@ interface AlibabaConfig {
   cloudSidecarTools?: boolean;
   // Optional Cloud model id for the sidecar (Qwen only). Empty = pick from catalog.
   cloudSidecarModel?: string;
+  // Auto-upgrade a shared regional Cloud domain (dashscope.aliyuncs.com,
+  // dashscope-intl…, dashscope-us…) to Alibaba's recommended workspace domain
+  // {WorkspaceId}.{region}.maas.aliyuncs.com once the WorkspaceId has been
+  // discovered AND the candidate domain passes a live probe. Default true;
+  // explicitly picking a shared domain in /alibaba → Cloud — Change Domain
+  // sets it to false (opt-out) so the upgrade never fights a manual choice.
+  cloudAutoWorkspaceDomain?: boolean;
+  // WorkspaceId discovered via GET /api/v1/models/limits (cached; also the
+  // placeholder/fallback of the manual workspace-domain prompt).
+  cloudWorkspaceId?: string;
+  // Timestamp of the last failed auto-probe; retried at most once per 24h.
+  cloudWorkspaceProbeFailedAt?: number;
 }
 
 const readJSON = <T>(p: string, fallback: T): T => {
@@ -637,6 +649,222 @@ const readCloudKey = (): string | null => {
   return process.env.DASHSCOPE_API_KEY || null;
 };
 
+// ── Workspace-domain auto-upgrade ────────────────────────────────────
+// Alibaba recommends migrating from the shared regional domains to workspace
+// domains {WorkspaceId}.{region}.maas.aliyuncs.com (better performance and
+// stability; the rate-limit and permissions endpoints are documented there).
+// The docs call the WorkspaceId console-only, but the key's workspace is
+// empirically discoverable: GET /api/v1/models/limits returns `workspace_id`
+// on every quota row — even on the shared domains where the endpoint itself
+// is undocumented. Discovery is best-effort and never trusted blindly: the
+// candidate domain must pass a live probe before the config is switched.
+
+const SHARED_DOMAIN_REGIONS: Record<string, string> = {
+  [DEFAULT_CLOUD_CN_DOMAIN]: WSID_BEIJING,
+  [DEFAULT_CLOUD_DOMAIN]: WSID_SINGAPORE,
+  [DEFAULT_CLOUD_US_DOMAIN]: WSID_US,
+};
+
+// Regions that have workspace domains {wsid}.{region}.maas.aliyuncs.com.
+const WORKSPACE_REGIONS: string[] = [WSID_BEIJING, WSID_SINGAPORE, WSID_TOKYO, WSID_FRANKFURT, WSID_US];
+
+// Reverse of SHARED_DOMAIN_REGIONS — where to rediscover the workspace from
+// when a configured workspace domain stops accepting the current key (the key
+// may have been swapped between runs for one from another region/site). Tokyo
+// and Frankfurt have no shared domain — they are workspace-only regions.
+export const REGION_SHARED_DOMAINS: Record<string, string> = {
+  [WSID_BEIJING]: DEFAULT_CLOUD_CN_DOMAIN,
+  [WSID_SINGAPORE]: DEFAULT_CLOUD_DOMAIN,
+  [WSID_US]: DEFAULT_CLOUD_US_DOMAIN,
+};
+
+// Parse an already-configured workspace domain — used to tell “nothing to do,
+// you are on one” apart from “this domain never auto-upgrades” (HK/custom).
+export function parseWorkspaceCloudDomain(domain: string): { wsid: string; region: string } | null {
+  const m = domain.trim().toLowerCase().match(/^([a-z0-9][a-z0-9-]{2,63})\.([a-z0-9-]+)\.maas\.aliyuncs\.com$/);
+  if (!m) return null;
+  const wsid = sanitizeWorkspaceId(m[1]);
+  if (!wsid || !WORKSPACE_REGIONS.includes(m[2])) return null;
+  return { wsid, region: m[2] };
+}
+
+// Region a shared domain belongs to, or null for anything else. Hong Kong,
+// custom hosts, and workspace domains themselves are never auto-upgraded
+// (Tokyo/Frankfurt have no shared domain — they are workspace-only).
+export const regionForSharedCloudDomain = (domain: string): string | null =>
+  SHARED_DOMAIN_REGIONS[domain.trim().toLowerCase()] ?? null;
+
+// The WorkspaceId is interpolated into a hostname, so accept only
+// conservative characters (real ids look like `llm-n9h5iz3a78nfmn7k`).
+export function sanitizeWorkspaceId(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const id = raw.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9-]{2,63}$/.test(id) ? id : null;
+}
+
+export function parseWorkspaceIdFromLimits(json: unknown): string | null {
+  const quotas = (json as { output?: { quotas?: unknown } } | null)?.output?.quotas;
+  if (!Array.isArray(quotas)) return null;
+  for (const q of quotas) {
+    const id = sanitizeWorkspaceId((q as { workspace_id?: unknown } | null)?.workspace_id);
+    if (id) return id;
+  }
+  return null;
+}
+
+export const WORKSPACE_PROBE_RETRY_MS = 24 * 60 * 60 * 1000;
+
+// Pure boot decision: try the auto-upgrade now? Fires only while the user has
+// not opted out, the effective domain is a shared regional one, and the last
+// failed probe (if any) is older than the 24h backoff. Zero network here —
+// the orchestrator below stays free on every launch once upgraded.
+export function shouldAutoUpgradeWorkspace(
+  cfg: { cloudAutoWorkspaceDomain?: boolean; cloudWorkspaceProbeFailedAt?: number },
+  domain: string,
+  now = Date.now(),
+): boolean {
+  if (cfg.cloudAutoWorkspaceDomain === false) return false;
+  if (!regionForSharedCloudDomain(domain)) return false;
+  const failedAt = cfg.cloudWorkspaceProbeFailedAt;
+  if (typeof failedAt === "number" && Number.isFinite(failedAt) && now - failedAt < WORKSPACE_PROBE_RETRY_MS) return false;
+  return true;
+}
+
+// Ask a domain which workspace this key belongs to (quota rows carry it).
+export async function detectCloudWorkspaceId(domain: string, apiKey: string): Promise<string | null> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const params = new URLSearchParams({ page_no: "1", page_size: "10" });
+    const res = await fetch(`https://${domain}/api/v1/models/limits?${params}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return null;
+    return parseWorkspaceIdFromLimits(await res.json());
+  } catch {
+    return null;
+  } finally { clearTimeout(t); }
+}
+
+// Cheap GET proving the candidate workspace domain resolves and serves the key.
+export async function probeWorkspaceDomain(domain: string, apiKey: string): Promise<boolean> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const res = await fetch(`https://${domain}/api/v1/models?page_no=1&page_size=1`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return false;
+    const json = (await res.json()) as { success?: boolean; output?: unknown };
+    return json.success !== false && json.output != null;
+  } catch {
+    return false;
+  } finally { clearTimeout(t); }
+}
+
+export type WorkspaceUpgradeResult =
+  | { status: "upgraded"; domain: string; wsid: string }
+  | { status: "already"; domain: string; reason: string }
+  | { status: "demoted"; domain: string; reason: string }
+  | { status: "unchanged"; reason: string }
+  | { status: "failed"; reason: string };
+
+// Detect → probe → switch, persisting the outcome to alibaba-config.json.
+// `force` (from the /alibaba menu) ignores the opt-out flag and the backoff.
+export async function upgradeCloudDomainToWorkspace(apiKey: string, force = false): Promise<WorkspaceUpgradeResult> {
+  const cfg = loadConfig();
+  const domain = cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN;
+  const region = regionForSharedCloudDomain(domain);
+  if (!region) {
+    const ws = parseWorkspaceCloudDomain(domain);
+    if (ws) {
+      if (!force) return { status: "already", domain, reason: `already on the workspace domain ${domain}` };
+      // Forced from the menu: verify the CURRENT key against the domain — it
+      // may have been swapped between runs. Same-region workspace swaps are a
+      // non-event (DashScope authenticates the key, not the wsid↔key pair);
+      // a key from another site (CN ↔ intl ↔ US) gets 401, so rediscover the
+      // workspace via the shared domains, current region first.
+      if (await probeWorkspaceDomain(domain, apiKey)) {
+        return { status: "already", domain, reason: `already on the workspace domain ${domain} (current key verified)` };
+      }
+      const primary = REGION_SHARED_DOMAINS[ws.region];
+      const order = primary
+        ? [primary, ...Object.values(REGION_SHARED_DOMAINS).filter((d) => d !== primary)]
+        : Object.values(REGION_SHARED_DOMAINS);
+      const probed: string[] = [];
+      for (const shared of order) {
+        const wsid = await detectCloudWorkspaceId(shared, apiKey);
+        if (wsid) {
+          const target = workspaceDomain(wsid, SHARED_DOMAIN_REGIONS[shared]);
+          if (target === domain) {
+            return { status: "failed", reason: `${domain} rejected the current key despite mapping to the same WorkspaceId ${wsid} — is the domain reachable?` };
+          }
+          if (await probeWorkspaceDomain(target, apiKey)) {
+            cfg.cloudWorkspaceId = wsid;
+            cfg.cloudDomain = target;
+            delete cfg.cloudWorkspaceProbeFailedAt;
+            saveConfig(cfg);
+            return { status: "upgraded", domain: target, wsid };
+          }
+          probed.push(target);
+        }
+        // Last resort: this shared domain serves the current key even though
+        // it revealed no usable workspace (e.g. models/limits is not offered
+        // on that site). Demote only on positive probe evidence, and opt out
+        // of the auto-upgrade so it cannot flip back into the same failure.
+        if (await probeWorkspaceDomain(shared, apiKey)) {
+          cfg.cloudDomain = shared;
+          cfg.cloudAutoWorkspaceDomain = false;
+          delete cfg.cloudWorkspaceId;
+          delete cfg.cloudWorkspaceProbeFailedAt;
+          saveConfig(cfg);
+          return {
+            status: "demoted",
+            domain: shared,
+            reason: `${domain} rejected the current key and no workspace was discoverable for it`,
+          };
+        }
+      }
+      return {
+        status: "failed",
+        reason: `${domain} rejected the current key (or is unreachable) and no shared domain accepted it either` +
+          (probed.length ? ` (probed: ${probed.join(", ")})` : ""),
+      };
+    }
+    return {
+      status: "unchanged",
+      reason: `${domain} is not a shared regional domain (auto-upgrade applies to ${Object.keys(SHARED_DOMAIN_REGIONS).join(", ")})`,
+    };
+  }
+  if (!force && !shouldAutoUpgradeWorkspace(cfg, domain)) {
+    return {
+      status: "unchanged",
+      reason: cfg.cloudAutoWorkspaceDomain === false ? "auto-upgrade is disabled" : "last probe failed <24h ago (backoff)",
+    };
+  }
+  // Live discovery first; the cached id is only a fallback (e.g. limits
+  // unreachable but the workspace domain itself would answer).
+  const wsid = (await detectCloudWorkspaceId(domain, apiKey)) ?? sanitizeWorkspaceId(cfg.cloudWorkspaceId);
+  if (!wsid) {
+    cfg.cloudWorkspaceProbeFailedAt = Date.now();
+    saveConfig(cfg);
+    return { status: "failed", reason: "no workspace_id in the /api/v1/models/limits response" };
+  }
+  const target = workspaceDomain(wsid, region);
+  if (!(await probeWorkspaceDomain(target, apiKey))) {
+    cfg.cloudWorkspaceProbeFailedAt = Date.now();
+    saveConfig(cfg);
+    return { status: "failed", reason: `${target} did not answer the probe` };
+  }
+  cfg.cloudWorkspaceId = wsid;
+  cfg.cloudDomain = target;
+  delete cfg.cloudWorkspaceProbeFailedAt;
+  saveConfig(cfg);
+  return { status: "upgraded", domain: target, wsid };
+}
+
 // ── Cloud login seed ─────────────────────────────────────────────────
 // pi hides any provider that has zero registered models, so with no
 // credential at all the Cloud provider would vanish from /login → "Use an
@@ -837,7 +1065,7 @@ export default async function (pi: ExtensionAPI) {
   let planCreds: { access?: string; refresh?: string } | undefined;
   if (planKey) { try { planCreds = readAuth()["alibaba-plan"]; } catch {} }
   const planEndpoints = resolvePlanEndpoints(planCreds);
-  const cloudDomain = config.cloudDomain || DEFAULT_CLOUD_DOMAIN;
+  let cloudDomain = config.cloudDomain || DEFAULT_CLOUD_DOMAIN;
   const cloudFmt: CloudApiFormat = config.cloudApiFormat || "anthropic-messages";
 
   // Cache-first: pi awaits this factory before it registers providers, so
@@ -845,7 +1073,21 @@ export default async function (pi: ExtensionAPI) {
   // same loaders with force=false; /alibaba → "Refresh model lists" still
   // calls the fetchers directly.
   if (planCreds?.access) planDefs = await loadPlanDefs(false, planCreds);
-  if (cloudKey) cloudDefs = await loadCloudDefs(cloudDomain, cloudKey, false);
+  if (cloudKey) {
+    // One-shot endpoint upgrade: shared regional domain → workspace domain.
+    // Pure checks first, so a normal launch pays zero network; on success the
+    // catalog below is fetched from the upgraded domain directly.
+    const up = await upgradeCloudDomainToWorkspace(cloudKey);
+    if (up.status === "upgraded") {
+      console.warn(
+        `[alibaba] Cloud endpoint auto-upgraded to the workspace domain ${up.domain} (WorkspaceId ${up.wsid}) — ` +
+        "Alibaba recommends workspace domains for performance and stability. " +
+        "Manage or undo: /alibaba → Cloud — Auto workspace domain / Change Domain.",
+      );
+      cloudDomain = up.domain;
+    }
+    cloudDefs = await loadCloudDefs(cloudDomain, cloudKey, false);
+  }
   // Keep the Cloud provider visible in /login even with no models yet (issue #1).
   if (!cloudDefs.length) cloudDefs = CLOUD_LOGIN_SEED;
 
@@ -915,6 +1157,11 @@ export default async function (pi: ExtensionAPI) {
 
     const key = readCloudKey();
     if (key) {
+      // Covers logging into Cloud mid-process: the boot factory had no key yet.
+      const up = await upgradeCloudDomainToWorkspace(key);
+      if (up.status === "upgraded") {
+        console.warn(`[alibaba] Cloud endpoint auto-upgraded to the workspace domain ${up.domain} (WorkspaceId ${up.wsid}).`);
+      }
       const cfg = loadConfig();
       const domain = cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN;
       cloudDefs = await loadCloudDefs(domain, key, false);
@@ -999,6 +1246,7 @@ export default async function (pi: ExtensionAPI) {
         "Re-login Cloud",
         "Plan — Change Endpoints",
         "Cloud — Change Domain",
+        "Cloud — Auto workspace domain",
         "Cloud — Change API Format",
         "Cloud — DashScope built-in tools",
         "Rate limits (Cloud)",
@@ -1032,6 +1280,7 @@ export default async function (pi: ExtensionAPI) {
           ``,
           `Cloud: ${cloudCred ? "logged in" : (process.env.DASHSCOPE_API_KEY ? "via $DASHSCOPE_API_KEY" : "not logged in")}`,
           `       Domain:    ${cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN}`,
+          `       Auto-WS:   ${cfg.cloudAutoWorkspaceDomain === false ? "off" : "on"}${cfg.cloudWorkspaceId ? ` (WorkspaceId ${cfg.cloudWorkspaceId})` : ""}`,
           `       Format:    ${cfg.cloudApiFormat || "anthropic-messages"}`,
           `       Sidecar:   ${cfg.cloudSidecarTools ? `on (${cfg.cloudSidecarModel || "auto Qwen"})` : "off"}`,
           `       Auth-only: ${cfg.cloudAuthorizedOnly === false ? "off" : "on (when endpoint available)"}${cloudCache?.authorizedOnly ? " — active (filtered list)" : ""}`,
@@ -1124,7 +1373,6 @@ export default async function (pi: ExtensionAPI) {
         if (!sel) return;
         let domain = sel.match(/\(([^)]+)\)/)?.[1] || "";
         if (sel.endsWith("workspace domain…")) {
-          const wsid = (await ctx.ui.input("Model Studio business-space ID (console → 业务空间详情):"))?.trim();
           const region = sel.startsWith("China")
             ? WSID_BEIJING
             : sel.startsWith("Singapore")
@@ -1134,14 +1382,75 @@ export default async function (pi: ExtensionAPI) {
                 : sel.startsWith("US")
                   ? WSID_US
                   : WSID_FRANKFURT;
+          const cached = sanitizeWorkspaceId(cfg.cloudWorkspaceId);
+          const input = await ctx.ui.input(
+            "Model Studio business-space ID (console → 业务空间详情):",
+            cached || "llm-…",
+          );
+          if (input === undefined) return; // dismissed
+          // Blank input falls back to the WorkspaceId discovered by the
+          // auto-upgrade (/alibaba → Cloud — Auto workspace domain).
+          const wsid = sanitizeWorkspaceId(input) ?? cached;
           if (wsid) domain = workspaceDomain(wsid, region);
         }
         if (sel.startsWith("Custom")) domain = (await ctx.ui.input("Cloud domain:")) || "";
         if (domain) {
+          // Explicitly landing on a shared regional domain means “stay here” —
+          // opt out of the boot auto-upgrade so it never fights this choice.
+          if (regionForSharedCloudDomain(domain)) cfg.cloudAutoWorkspaceDomain = false;
           cfg.cloudDomain = domain; saveConfig(cfg);
           ctx.ui.notify(`Cloud domain: ${domain}`, "info");
           await ctx.reload();
         }
+        return;
+      }
+
+      if (choice === "Cloud — Auto workspace domain") {
+        const DETECT = "Detect & upgrade now";
+        const ENABLE = "Enable auto-upgrade on boot";
+        const DISABLE = "Disable auto-upgrade on boot";
+        const enabled = cfg.cloudAutoWorkspaceDomain !== false;
+        const cached = sanitizeWorkspaceId(cfg.cloudWorkspaceId);
+        const current = cfg.cloudDomain || DEFAULT_CLOUD_DOMAIN;
+        const onWorkspace = parseWorkspaceCloudDomain(current);
+        const sel = await ctx.ui.select(
+          `Auto workspace domain — ${enabled ? "enabled" : "disabled"}` +
+            (cached ? `, WorkspaceId ${cached}` : "") +
+            ` (current: ${current}${onWorkspace ? " — already a workspace domain" : ""}):`,
+          [DETECT, enabled ? DISABLE : ENABLE],
+        );
+        if (!sel) return;
+        if (sel === DETECT) {
+          const key = readCloudKey();
+          if (!key) {
+            ctx.ui.notify("Cloud not logged in — no key in auth.json and no $DASHSCOPE_API_KEY. Run /login first.", "error");
+            return;
+          }
+          const up = await upgradeCloudDomainToWorkspace(key, true);
+          if (up.status === "upgraded") {
+            ctx.ui.notify(`Cloud domain upgraded to ${up.domain} (WorkspaceId ${up.wsid}). Reloading…`, "info");
+            await ctx.reload();
+          } else if (up.status === "demoted") {
+            ctx.ui.notify(
+              `${up.reason}. Fell back to the shared ${up.domain}; auto-upgrade disabled — re-enable it from this menu once your key's workspace is discoverable. Reloading…`,
+              "warning",
+            );
+            await ctx.reload();
+          } else if (up.status === "already") {
+            ctx.ui.notify(`Cloud is ${up.reason} — nothing to upgrade.`, "info");
+          } else {
+            ctx.ui.notify(`Not upgraded (${up.status}): ${up.reason}.`, "warning");
+          }
+          return;
+        }
+        cfg.cloudAutoWorkspaceDomain = sel === ENABLE;
+        saveConfig(cfg);
+        ctx.ui.notify(
+          cfg.cloudAutoWorkspaceDomain
+            ? "Auto workspace-domain upgrade enabled — applied on the next boot while on a shared regional domain."
+            : "Auto workspace-domain upgrade disabled.",
+          "info",
+        );
         return;
       }
 
