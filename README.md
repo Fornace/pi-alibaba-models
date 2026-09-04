@@ -192,6 +192,8 @@ Default to **`search`**. `research` (search + extractor + interpreter, thinking 
 
 ## Files
 
+All paths live in pi's config directory — `~/.pi/agent` by default, or `$PI_CODING_AGENT_DIR` when that override is set (the extension resolves them via pi's `getAgentDir()`).
+
 | Path                                                  | Purpose                            |
 |-------------------------------------------------------|------------------------------------|
 | `~/.pi/agent/auth.json`                               | Both provider credentials (0600)   |

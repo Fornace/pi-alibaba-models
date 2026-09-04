@@ -1,6 +1,5 @@
-import type { ExtensionAPI, ProviderModelConfig, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ProviderModelConfig, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
   ALIBABA_TOOLS_PARAMETERS,
@@ -15,7 +14,11 @@ import {
 } from "./sidecar.ts";
 
 // ── Paths ─────────────────────────────────────────────────────────────
-const HOME_DIR = path.join(os.homedir(), ".pi", "agent");
+// Resolve through pi's own getAgentDir() so a relocated config directory
+// (PI_CODING_AGENT_DIR, e.g. Nix/Guix store paths) is honored. Hardcoding
+// ~/.pi/agent here made the extension miss /login credentials and scrub the
+// wrong settings.json under an override.
+const HOME_DIR = getAgentDir();
 const CONFIG_PATH = path.join(HOME_DIR, "alibaba-config.json");
 const AUTH_PATH = path.join(HOME_DIR, "auth.json");
 const PLAN_CACHE_PATH = path.join(HOME_DIR, "alibaba-plan-models.cache.json");
