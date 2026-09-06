@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1
+
+- Decode catalog responses that contain gzip bytes without encoding headers.
+  Both Plan and Cloud refreshes use the same bounded JSON reader.
+- Limit received catalog bodies to 1 MiB and gzip output to 4 MiB; cancel
+  pending reads with the existing request deadline. Already-decoded JSON is
+  accepted without decompressing it again. Existing cache fallback is unchanged.
+
 ## 1.1.0
 
 > August 2026 generation: context-window heuristics for the newest models. Live catalogs already pick up the new ids automatically; these changes make their capability cards correct.

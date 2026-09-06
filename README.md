@@ -110,6 +110,10 @@ The plan model list is fetched from the canonical Qwen Code template:
 
 Cached at `~/.pi/agent/alibaba-plan-models.cache.json` for **4 hours**. The live API is always the source of truth; on a failed fetch the extension falls back to the last-known-good on-disk cache (and, if there's no cache either, registers an empty list rather than crashing). Force a refresh from `/alibaba → Refresh model lists`.
 
+Catalog refresh accepts plain JSON and headerless gzip responses. Reads retain
+their existing deadlines, with a 1 MiB received-body limit and a 4 MiB gzip-output
+limit. Malformed or oversized responses use the existing failure/cache path.
+
 `deepseek-v3.2` (and any plan-served models the upstream template omits) is merged in via a small allow-list so the picker reflects what the endpoint actually serves. The Cloud provider mirrors the live `/v1/models` response — V4 Pro/Flash, Qwen 3.7 Max/Plus, Qwen 3.6 Max/Plus, Kimi K2.6, GLM-5, MiniMax M2.5 etc. all surface automatically as Alibaba ships them.
 
 ## Limitations & Known Issues

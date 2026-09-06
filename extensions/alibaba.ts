@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { removeCredential, getCredential, setCredential } from "./auth-compat.ts";
+import { readCatalogJSON } from "./catalog-json.ts";
 
 // ── Paths ─────────────────────────────────────────────────────────────
 const HOME_DIR = path.join(os.homedir(), ".pi", "agent");
@@ -120,7 +121,7 @@ async function fetchPlanModelsFromAPI(credentials?: { access?: string; refresh?:
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = (await res.json()) as { data?: { id: string }[] };
+    const json = await readCatalogJSON<{ data?: { id: string }[] }>(res, ctrl.signal);
     if (!json.data?.length) throw new Error("No models in response");
     // Filter out image/audio/etc — only keep chat-capable models.
     const exclude = /(image|audio|video|tts|asr|embed|vector|rerank|wan|omni|livetranslate|realtime)/i;
@@ -194,7 +195,7 @@ async function fetchCloudModels(domain: string, apiKey: string, _force = false):
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = (await res.json()) as { data?: { id: string; name?: string }[] };
+    const json = await readCatalogJSON<{ data?: { id: string; name?: string }[] }>(res, ctrl.signal);
     if (!json.data?.length) throw new Error("No models");
     // Filter out non-LLMs (image, audio, video, embedding, etc.) — we only want chat models.
     const exclude = /(image|audio|video|tts|asr|embed|vector|rerank|wan|omni|livetranslate|realtime)/i;
