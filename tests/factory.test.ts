@@ -56,13 +56,21 @@ if (process.env.MODE === "info") {
       refresh: typeof p.refreshModels === "function",
     };
   }
-  const event = { prompt: "hi", systemPrompt: "", systemPromptOptions: { sections: {} } };
-  for (const h of handlers.before_agent_start ?? []) await h(event, {});
+  // pi 1.2.0: before_agent_start is a union — "user" events carry a prompt,
+  // "custom" events (pi.sendMessage(..., { triggerTurn: true })) carry the
+  // starting message and no prompt. Drive the handler with both shapes.
+  const userEvent = { messageType: "user", prompt: "hi", systemPrompt: "", systemPromptOptions: { sections: {} } };
+  const customEvent = { messageType: "custom", message: { role: "user", customType: "alibaba-image", content: [] }, systemPrompt: "", systemPromptOptions: { sections: {} } };
+  for (const h of handlers.before_agent_start ?? []) {
+    await h(userEvent, {});
+    await h(customEvent, {});
+  }
   process.stdout.write(JSON.stringify({
     tools: toolInfo,
     providers: providerInfo,
-    section: event.systemPromptOptions.sections.alibaba ?? null,
-    sectionCount: Object.keys(event.systemPromptOptions.sections).length,
+    section: userEvent.systemPromptOptions.sections.alibaba ?? null,
+    sectionCount: Object.keys(userEvent.systemPromptOptions.sections).length,
+    sectionCustom: customEvent.systemPromptOptions.sections.alibaba ?? null,
   }));
 } else if (process.env.MODE.startsWith("command")) {
   const registryMode = process.env.REGISTRY_MODE || "ok";
@@ -251,6 +259,15 @@ describe("factory registration: mixed provider + tool exposure", () => {
     assert.match(out.section, /alibaba_tools/);
     assert.match(out.section, /alibaba_image/);
     assert.match(out.section, /qwen-image-\*/);
+  });
+
+  it("adds the same section to a custom-message run (pi 1.2.0 event union)", async () => {
+    const dir = makeFixture({});
+    const out = JSON.parse(await runChild(dir, "info"));
+    // A run started by pi.sendMessage(..., { triggerTurn: true }) reaches the
+    // same codemode tools, so the section must not be gated on messageType.
+    assert.match(out.sectionCustom, /alibaba_tools/);
+    assert.equal(out.sectionCustom, out.section);
   });
 
   it("honors per-tool exposure and drops an off tool entirely", async () => {

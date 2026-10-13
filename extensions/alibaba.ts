@@ -2610,7 +2610,8 @@ export default async function (pi: ExtensionAPI) {
     // Captured verbatim so a warm replays a byte-identical prefix. Compaction
     // and branch summaries never arrive here: pi wires `onPayload`, which is
     // what emits this event, only through the agent loop, and builds summary
-    // options without it (re-verified in pi 1.1.0). They *do* reach
+    // options without it (re-verified in pi 1.1.0 and in 1.2.0, where
+    // compaction still passes the bare stream function). They *do* reach
     // `before_provider_headers`, so `pendingHeaders` can briefly hold a
     // summary's headers — harmless, because nothing is captured without a
     // payload event and the next real request overwrites them first. pi's own
@@ -2715,6 +2716,14 @@ export default async function (pi: ExtensionAPI) {
   // `promptGuidelines` are never rendered. One system-prompt section tells the
   // model the tools exist and points image generation at the recommended
   // family. Present only while at least one Alibaba tool is codemode-exposed.
+  //
+  // Since pi 1.2.0 the event is a union on `messageType`: "user" for prompts,
+  // "custom" for runs started by pi.sendMessage(..., { triggerTurn: true }).
+  // The section deliberately applies to both kinds — a custom run reaches the
+  // same tools, and 1.2.0 is the release that stops such runs from dropping
+  // before_agent_start sections after their first tool call. No messageType
+  // guard: this handler reads no user-only field, and a pre-1.2.0 host sends
+  // no messageType at all, so the same code keeps working on the 1.0.0 floor.
   pi.on("before_agent_start", (event) => {
     const cfg = loadConfig();
     const callable: string[] = [];

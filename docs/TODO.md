@@ -207,3 +207,31 @@ we do not use yet.
   so a marker missing here costs a redundant `server_error ` prefix on an already-retryable message,
   while a marker present here but not in a 1.0.x host would silently stop that host retrying. The
   host floor is 1.0.0, so the list follows the oldest supported host, not the newest.
+
+## New host surfaces worth adopting (pi 1.2.0)
+
+Verified 2026-10-13 against the installed 1.2.0 (`tsc --noEmit` clean, 284/284 tests, offline boot
+via `pi -ne -e <repo> --offline --list-models alibaba-cloud`). The release's one breaking change for
+extensions — `before_agent_start` becoming a union on `messageType` that also fires for
+`pi.sendMessage(..., { triggerTurn: true })` runs — is handled by design (the codemode-tools section
+applies to both kinds; see the 2.1.4 changelog). The items below are what 1.2.0 adds that we do not
+use yet.
+
+- **A `$schema` for `alibaba-config.json`.** pi 1.2.0 publishes generated schemas for its own files
+  (`https://pi.dev/schemas/*.schema.json`, referenced from `settings.json`, `models.json`, keybindings
+  and themes). They do not cover our config, which we write ourselves, but the pattern is the one
+  thing worth copying: a checked-in schema plus a `$schema` pointer in the default config would give
+  `alibaba-config.json` the same editor validation the host now gets. Needs a decision on hosting
+  (raw file from the repo) and on keeping the schema honest against `loadConfig()`'s fallback rules.
+- **Tool-namespace aliases.** `describeNamespace()` and `searchTools({ namespace })` now match
+  aliases, and MCP namespaces use the server name. A `dashscope` alias for `alibaba` is the only
+  candidate and nothing asks for it; recorded so the idea is not rediscovered.
+- **`reachesTools` on tool definitions** declares which tools a call may reach (codemode and
+  `tool_search` set it; the MCP extension waits on the servers a call needs). Both Alibaba tools
+  call DashScope HTTP directly and reach nothing, so there is nothing to declare — the entry exists
+  to record that the field was checked, not missed.
+- **No action on the rest.** Codemode rows showing elapsed/total time, `@`-tag input constraints in
+  codemode declarations, per-key OpenRouter model lists, `PI_CLIPBOARD_OSC52`, the published theme
+  schema, and `pi mcp list --json` reporting `resources: true` are all host-side surfaces this
+  extension never touches; the removal of `@earendil-works/chord` and the experimental
+  server/client stack removed no import of ours (typecheck against 1.2.0 would have flagged one).

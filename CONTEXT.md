@@ -181,7 +181,9 @@ _Avoid_: visibility, mode
 
 **Prompt section**:
 The one `before_agent_start` section, present only while an Alibaba tool is codemode-exposed, that
-tells the model the tools are callable from scripts and to prefer `qwen-image-*`.
+tells the model the tools are callable from scripts and to prefer `qwen-image-*`. Since pi 1.2.0 the
+handler serves both event kinds of the `messageType` union — user prompts and custom-message runs
+started with `triggerTurn` — because both reach the same tools.
 _Avoid_: prompt snippet (that is a per-tool declaration rendered only while a tool is active)
 
 ### Host
