@@ -7,7 +7,7 @@
 #
 # Отличие этой репы от восьми остальных в семействе (у них `check.yml` байт в
 # байт один и тот же, devDependencies пусты, а pi линкуется из глобальной
-# установки): хост здесь — настоящая `devDependencies` (`pi-coding-agent ^1.1.0`,
+# установки): хост здесь — настоящая `devDependencies` (`pi-coding-agent ^1.3.0`,
 # TypeScript 6.0.3, `package-lock.json` закоммичен), как в pi-volcengine и
 # pi-paratera. Поэтому две job'ы:
 #   pinned — `npm ci`, то есть ровно поддерживаемая конфигурация;
@@ -71,7 +71,7 @@ jobs:
       fail-fast: false
       matrix:
         # 22 — нижняя граница `engines` у pi (>=22.19), 26 — то, на чём
-        # расширение разрабатывается (локально 273/273 и чистый tsc 6.0.3).
+        # расширение разрабатывается (локально 302/302 и чистый tsc 6.0.3).
         node: ["22", "26"]
     steps:
       - name: Check out repository

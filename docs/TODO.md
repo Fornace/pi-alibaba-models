@@ -235,3 +235,55 @@ use yet.
   schema, and `pi mcp list --json` reporting `resources: true` are all host-side surfaces this
   extension never touches; the removal of `@earendil-works/chord` and the experimental
   server/client stack removed no import of ours (typecheck against 1.2.0 would have flagged one).
+
+## New host surfaces worth adopting (pi 1.3.0)
+
+Verified 2026-10-16 against the installed 1.3.0 (`tsc --noEmit` clean, 302/302 tests, offline boot
+via `pi -ne -e <repo> --offline --list-models alibaba-cloud`). `dist/core/extensions/types.d.ts` is
+byte-identical to 1.2.0's — no new event, no new field on the extension-facing model config — and
+nothing in the release breaks this extension. The items below are what 1.3.0 adds that we do not use.
+
+- **`supportsMidConvoEffort`.** The capability behind "changing the thinking level mid-session keeps
+  the prompt cache" (GPT-6 over an API key, #10853). Like `samplingParamsByThinkingLevel` it sits on
+  the **models.json** `ProviderChatModelConfig` (`core/model-config.d.ts`), not on the
+  extension-facing one, so declaring it would take the undocumented cast-through-spread path. Worth a
+  probe before asking for the type: does DashScope keep an explicit block when `reasoning_effort` /
+  `enable_thinking` changes on an otherwise identical prefix? If it does, the field is a true
+  declaration for the Cloud cards, and a mid-session `--thinking` switch stops costing a full-price
+  rewrite; if it does not, the honest state is that our prefix is effort-sensitive and pi should keep
+  invalidating. Measurable with the 2.1.0 telemetry: one context, two turns at different levels, read
+  `cache_creation_input_tokens` on the second.
+- **Retry markers the host now knows.** 1.3.0 retries gateway `Unable to forward upstream stream`
+  (#10920) and `The service is temporarily unavailable` (#10965). Both `RETRYABLE_MARKER` regexes
+  stay a narrower subset of the host's on purpose (see the 1.1.0 note): a marker missing here costs
+  one redundant `server_error ` prefix on a message the host already retries, while a marker present
+  here but absent from a 1.0.x host would stop that host retrying at all. The floor is still 1.0.0.
+- **Codemode worker admission is now two live workers across sessions, counting cancelled workers
+  until they exit** (#10748). Not a surface to adopt but a constraint on the two `codemode`-exposed
+  Alibaba tools: a script calling `alibaba_tools` or `alibaba_image` holds a worker for the whole
+  call. Nothing to change while both are single HTTP requests with their own timeouts and retries.
+- **`kimi-coding` moved to OpenAI Chat Completions at `https://api.kimi.com/coding/v1`, and
+  `models.json` overrides of its base URL must now include `/v1`** (#10720). A host provider, not
+  ours — recorded because it is the rule this extension already follows: `cloudDefaultTransport`
+  builds `https://{domain}/compatible-mode/v1` with the `/v1`, and the Plan troubleshooting row says
+  the same about a custom OpenAI endpoint.
+- **Clean model switching** (a previous model's thinking blocks are dropped instead of being sent as
+  text, #10995) removes one way a Cloud transcript could be polluted after `/model`; the warm engine
+  already invalidates on `model_select`, so the prefix follows.
+- **No action on the rest.** `sessionShareDestination` (#10870), `formatReadLineRange` and the `read`
+  line-range fix (#9887), the model-resolver rewrite (`ModelReferenceRequest` / `ModelReferenceResult`
+  replacing `findExactModelReferenceMatch`, #10160), resumed-session tool loadouts (#10785), and the
+  overlay `done()` fix (#10648, #10999) touch nothing here: this extension imports none of them and
+  uses no `ctx.ui.custom({ overlay: true })` — its UI surface is `select` / `input` / `confirm` /
+  `notify` / `setStatus`.
+
+### Upstream ask recorded by 2.1.5
+
+**A credential-changed event.** `/login` still fires nothing an extension can hear: the host
+recomposes the provider and refreshes it with `allowNetwork: false`
+(`ModelRuntime.synchronizeCredentialState`), so every extension that derived state from a credential
+— an endpoint, a catalog, a captured request — has to notice on its own. 2.1.5's credential watch is
+that answer here (checked before a run and before a compaction, where being late costs a request). A
+`credentials_changed` event, or a network-allowed refresh after a successful login, would let
+extensions drop derived state instead of looking for it; until then the watch is the cheaper of the
+two mistakes.
