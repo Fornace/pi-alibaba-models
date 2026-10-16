@@ -450,7 +450,15 @@ describe("cache telemetry log", () => {
 
 interface FakeTimer { fn: () => void; at: number }
 
-function harness(opts: { settings?: Partial<WarmSettings>; status?: number; usage?: unknown } = {}) {
+function harness(opts: {
+  settings?: Partial<WarmSettings>;
+  status?: number;
+  usage?: unknown;
+  /** The credential a replay must still match; omit to leave the dep unset. */
+  credential?: () => string | null | undefined;
+  /** Signature carried by the captured template; omit for an unsigned one. */
+  cred?: string | null;
+} = {}) {
   const timers: FakeTimer[] = [];
   const requests: { url: string; init: RequestInit }[] = [];
   let clock = 1_800_000_000_000;
@@ -461,6 +469,7 @@ function harness(opts: { settings?: Partial<WarmSettings>; status?: number; usag
     settings: () => settings,
     logFile: () => logFile,
     now: () => clock,
+    ...(opts.credential ? { credential: opts.credential } : {}),
     setTimeout: (fn, ms) => { const t = { fn, at: clock + ms }; timers.push(t); return t; },
     clearTimeout: (h) => { const i = timers.indexOf(h as FakeTimer); if (i >= 0) timers.splice(i, 1); },
     fetch: async (url, init) => {
@@ -492,6 +501,7 @@ function harness(opts: { settings?: Partial<WarmSettings>; status?: number; usag
     payload,
     at: clock,
     ctx: contextId(payload, "openai-responses") as string,
+    cred: opts.cred,
   };
   /** Run every timer that came due, flushing the async warm between them. */
   const advance = async (ms: number) => {
@@ -726,5 +736,80 @@ describe("cache warmer engine", () => {
     assert.equal(logged.length, 1);
     assert.equal(logged[0].ctx, h.template.ctx);
     assert.equal(h.warmer.status().template?.ctx, h.template.ctx);
+  });
+});
+
+// A replay sends the captured headers verbatim — `authorization` included — so
+// a template that outlives its credential keeps spending a key the user has
+// already replaced. The guard is in the engine, not in the caller: it is the
+// last thing standing between an armed timer and a request nobody asked for.
+describe("cache warmer credential guard", () => {
+  it("never replays a template whose credential the process has replaced", async () => {
+    let active: string | null = "sig-a";
+    const h = harness({ cred: "sig-a", credential: () => active });
+    h.warmer.noteRequest(h.template);
+    h.warmer.notePromptTokens(150_000);
+    assert.equal(h.warmer.status().running, true);
+
+    active = "sig-b"; // /login swapped the Cloud key mid-session
+    await h.advance(216_000);
+    assert.equal(h.requests.length, 0, "the replaced key must not go out again");
+    const st = h.warmer.status();
+    assert.equal(st.running, false);
+    assert.match(st.reason ?? "", /credential changed/);
+    assert.equal(st.template, undefined);
+    assert.equal(st.warms, 0, "a refused replay is not a warm…");
+    assert.equal(st.failures, 0, "…and not a failure: nothing was sent");
+    assert.deepEqual(readCacheLog(h.logFile), [], "it never reaches telemetry either");
+    // Dropped, not merely skipped this once: "Warm now" agrees.
+    assert.equal(await h.warmer.warmNow(), undefined);
+    assert.equal(h.requests.length, 0);
+    assert.equal(h.timers.length, 0);
+  });
+
+  it("treats a credential that is gone as a change too", async () => {
+    let active: string | null = "sig-a";
+    const h = harness({ cred: "sig-a", credential: () => active });
+    h.warmer.noteRequest(h.template);
+    h.warmer.notePromptTokens(150_000);
+    active = null; // logged out while the engine was armed and nothing ran
+    await h.advance(216_000);
+    assert.equal(h.requests.length, 0);
+    assert.match(h.warmer.status().reason ?? "", /credential changed/);
+  });
+
+  it("replays while the signature matches, and vetoes nothing it cannot compare", async () => {
+    const matching = harness({ cred: "sig-a", credential: () => "sig-a" });
+    matching.warmer.noteRequest(matching.template);
+    matching.warmer.notePromptTokens(150_000);
+    await matching.advance(216_000);
+    assert.equal(matching.requests.length, 1);
+
+    // No dep: this caller does not track credentials. No signature: a template
+    // captured without one. A veto needs two known values to disagree.
+    for (const opts of [{ cred: "sig-a" }, { credential: () => "sig-b" }]) {
+      const h = harness(opts);
+      h.warmer.noteRequest(h.template);
+      h.warmer.notePromptTokens(150_000);
+      await h.advance(216_000);
+      assert.equal(h.requests.length, 1);
+    }
+  });
+
+  it("resumes on the next real request, which carries the new credential", async () => {
+    let active = "sig-a";
+    const h = harness({ cred: "sig-a", credential: () => active });
+    h.warmer.noteRequest(h.template);
+    h.warmer.notePromptTokens(150_000);
+    active = "sig-b";
+    await h.advance(216_000);
+    assert.equal(h.requests.length, 0);
+
+    h.warmer.noteRequest({ ...h.template, cred: "sig-b", at: h.at() });
+    h.warmer.notePromptTokens(150_000);
+    assert.equal(h.warmer.status().running, true);
+    await h.advance(216_000);
+    assert.equal(h.requests.length, 1);
+    assert.equal(h.requests[0].init.headers?.authorization, "Bearer k");
   });
 });

@@ -37,6 +37,27 @@ _Avoid_: key fingerprint (that is the field that stores the binding), rebind
 
 Plan keeps two base URLs — Anthropic and OpenAI — and neither is called a "domain".
 
+### Credentials
+
+**Credential watch**:
+`extensions/credential-watch.ts`, which observes the effective Cloud key and Plan token because pi
+writes `/login` credentials without firing an extension event. Pull, not push: checked before every
+turn and before every compaction, the two points where a Cloud request is about to be dispatched with
+whatever the cards currently say.
+_Avoid_: login hook, auth listener, key watcher
+
+**Credential signature**:
+The opaque sha256/16 hex the watch compares and a warm template records — which credential it is,
+never what it says. The same primitive the key binding stores, so "the same key" means one thing in
+both places.
+_Avoid_: key hash, token, fingerprint (that is the config field)
+
+**Credential change**:
+What the watch reports: the names whose signature moved, where a login and a logout both count. What
+follows is the caller's decision, and this extension's is fixed — drop the warm template, re-derive
+the Cloud binding, re-register, then refetch the catalog off the critical path.
+_Avoid_: relogin, key rotation
+
 ### Catalogs
 
 **Catalog snapshot**:
@@ -95,7 +116,8 @@ _Avoid_: cache warmer (that is pi's), keep-alive, refresher
 
 **Warm template**:
 The request the engine captured as pi dispatched it — payload plus resolved headers — and replays
-verbatim. One per process, replaced by every real request, dropped when the transcript is rewritten.
+verbatim. One per process, replaced by every real request, dropped when the transcript is rewritten
+or when the credential it was captured with stops being the active one.
 _Avoid_: snapshot, payload copy, cached request
 
 **Refresh**:

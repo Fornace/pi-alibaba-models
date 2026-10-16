@@ -1,7 +1,6 @@
 import { getAgentDir, type ExtensionAPI, type ProviderModelConfig as PiModelConfig, type ExtensionCommandContext, VERSION } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { assertSingleInstall, findPackageRoot } from "./duplicate-guard.ts";
 import {
@@ -51,6 +50,12 @@ import {
   type WarmSettings,
 } from "./cache-warm.ts";
 import { injectCacheControl } from "./cache-control.ts";
+import {
+  createCredentialWatch,
+  credentialSignature,
+  type CredentialSet,
+  type CredentialWatch,
+} from "./credential-watch.ts";
 import {
   buildEquivalenceIndex,
   resolveContextWindow,
@@ -1527,9 +1532,9 @@ export async function upgradeCloudDomainToWorkspace(apiKey: string, force = fals
 
 // Fingerprint of a key — records WHICH key the endpoint config was derived
 // from without ever storing the key itself (auth.json stays the only key store).
-export function cloudKeyFingerprint(key: string): string {
-  return createHash("sha256").update(key).digest("hex").slice(0, 16);
-}
+// The same primitive the credential watch signs with, so "the same key" means
+// one thing in the binding and in the watch.
+export const cloudKeyFingerprint = (key: string): string => credentialSignature(key);
 
 // Pure: does the active key still match the one the Cloud endpoint config was
 // last derived from? A missing fingerprint (pre-upgrade install, or a key
@@ -2574,8 +2579,77 @@ export default async function (pi: ExtensionAPI) {
   const warmer: CacheWarmer = createCacheWarmer({
     settings: warmSettings,
     logFile: () => CACHE_LOG_PATH,
+    // A replay sends the captured `authorization` header verbatim, so the
+    // engine vetoes one whose credential is no longer the active Cloud key —
+    // the guard that holds even while nothing runs and no hook fires.
+    credential: () => credentialSignature(readCloudKey()),
     log: process.env.PI_ALIBABA_CACHE_DEBUG === "1" ? (line) => console.error(line) : undefined,
   });
+
+  // ── Credential watch (the /login pi never announces) ─────────────────
+  // Everything this extension derives from a credential — the Cloud domain a
+  // key is bound to, the catalog its account authorizes, the warm template's
+  // headers — has to be re-derived by us, because pi fires no event when
+  // /login writes one (see credential-watch.ts). Checked before every turn and
+  // before every compaction: the two points where a Cloud request is about to
+  // be dispatched with whatever the cards currently say.
+  const credentialSet = (): CredentialSet => ({
+    cloud: credentialSignature(readCloudKey()),
+    plan: credentialSignature(extractKey(readAuth()["alibaba-plan"])),
+  });
+  const CREDENTIAL_LABELS: Record<string, string> = { cloud: "Cloud", plan: "Plan" };
+
+  async function reactToCredentials(changed: string[]): Promise<void> {
+    const what = changed.map((n) => CREDENTIAL_LABELS[n] ?? n).join(" and ");
+    // First and unconditionally: drop a template captured under the previous
+    // credential, so no timer can fire it while the reaction is still running.
+    warmer.invalidate(`the ${what} credential changed`);
+
+    if (changed.includes("plan")) {
+      // The Plan token decides both the endpoints (resolvePlanEndpoints reads
+      // the credential) and the model list, so the catalog follows the token.
+      if (extractKey(readAuth()["alibaba-plan"])) {
+        console.warn("[alibaba] Plan credential changed mid-session — refetching its catalog.");
+        await loadPlanCatalog(true);
+        registerPlanProvider(pi);
+      }
+    }
+
+    if (changed.includes("cloud")) {
+      const key = readCloudKey();
+      // Logged out: nothing to derive, and pi marks the provider unconfigured
+      // on its own. The cards stay until a key comes back.
+      if (!key) {
+        console.warn("[alibaba] Cloud credential removed mid-session — warming stopped, nothing to re-derive.");
+        return;
+      }
+      console.warn("[alibaba] Cloud credential changed mid-session — re-deriving the endpoint from the new key.");
+      // The binding is per key: derive the domain of the NEW key (its default
+      // endpoint first, then its own workspace domain) before any request can
+      // reach the previous key's endpoint.
+      await ensureCloudEndpointBound(key);
+      // Re-registering is what moves the cards — pi recomposes the provider and
+      // swaps the session's current model for the one carrying the new baseUrl.
+      registerCloudProvider(pi);
+      // The catalog is per account (the authorized-only filter), so it follows
+      // the key. Off the run's critical path: the domain above is what makes a
+      // request valid, and the list already in hand is usable meanwhile. A
+      // fetch that learned nothing leaves that list alone — re-registering it
+      // would only churn the cards, and re-seeding the snapshot would hand the
+      // new key the previous account's models.
+      const domain = loadConfig().cloudDomain || DEFAULT_CLOUD_DOMAIN;
+      void loadCloudCatalog(domain, key, true)
+        .then((res) => { if (res.fetched) registerCloudProvider(pi); })
+        .catch((e: any) =>
+          console.warn(`[alibaba] Cloud catalog refresh after the key change failed (${e?.message || e}).`));
+    }
+  }
+
+  const credentials: CredentialWatch = createCredentialWatch({
+    read: credentialSet,
+    onChange: (changed) => reactToCredentials(changed),
+  });
+
   // Headers of the request being dispatched. `before_provider_headers` fires
   // first (pi-ai resolves auth, then builds the payload), and the object pi
   // hands over is mutated in place, so it is copied.
@@ -2632,6 +2706,9 @@ export default async function (pi: ExtensionAPI) {
           payload: outgoing,
           at: Date.now(),
           ctx: warmCtx,
+          // The credential this request was dispatched with, signed: a replay
+          // is refused once the process moves to another one.
+          cred: credentialSignature(readCloudKey()),
         });
         warmer.noteInFlight(true);
       }
@@ -2674,12 +2751,35 @@ export default async function (pi: ExtensionAPI) {
   pi.on("agent_end", () => warmer.noteInFlight(false));
   // Anything that rewrites the transcript invalidates the cached prefix, so the
   // captured request is no longer worth replaying.
-  pi.on("session_before_compact", () => warmer.invalidate("compaction rewrites the prefix"));
+  //
+  // Compaction also dispatches a Cloud request, and pi runs the one that opens
+  // a run *before* any `turn_start` — so a credential swapped mid-session is
+  // caught here too, or the summary would be requested from the previous key's
+  // endpoint.
+  pi.on("session_before_compact", async () => {
+    warmer.invalidate("compaction rewrites the prefix");
+    await credentials.check();
+  });
   pi.on("session_before_tree", () => warmer.invalidate("branch switch rewrites the prefix"));
   pi.on("session_before_switch", () => warmer.invalidate("session switch"));
   pi.on("model_select", () => warmer.invalidate("model switch changes the cached prefix"));
   pi.on("session_start", () => warmer.invalidate("session start"));
   pi.on("session_shutdown", () => warmer.stop());
+
+  // Every turn starts here, and pi awaits the handler before it dispatches the
+  // request (`agent-loop` does `await emit({type:"turn_start"})`, and the agent
+  // awaits its listeners — the same in the 1.0.0 floor), so this is the last
+  // moment a credential swapped by /login can still be acted on. Per turn, not
+  // per run: a swap made while the agent works is caught before its next
+  // request rather than before the next prompt.
+  //
+  // Awaited, which means the one turn after a swap pays the derivation's probes
+  // (6 s each, and only for a key the binding has not seen; the usual case is
+  // the first default endpoint answering). The alternative is that same turn
+  // failing against an endpoint that does not know the new key.
+  pi.on("turn_start", async () => {
+    await credentials.check();
+  });
 
   // Mode `pi`: pi's warmer decides by expected *savings*, which for a corporate
   // key is the wrong question — a cold 200k-token prompt costs a minute, not a
@@ -2783,6 +2883,9 @@ export default async function (pi: ExtensionAPI) {
       if ((loadConfig().cloudDomain || DEFAULT_CLOUD_DOMAIN) !== before) registerCloudProvider(pi); // baseUrl changed
     }
     await ctx.modelRegistry.refresh();
+    // This handler just did the watch's job for the key it found; adopt it as
+    // the baseline so the first turn does not derive the same binding twice.
+    credentials.rebase();
    } catch (e: any) {
     console.warn(`[alibaba] session_start catalog refresh failed (${e?.message || e}); keeping previously loaded models.`);
    }
@@ -2881,6 +2984,10 @@ export default async function (pi: ExtensionAPI) {
           // pi's own refresh path: our `refreshModels` handlers fetch and pi
           // persists the result (`force` bypasses its freshness checks).
           const res = await ctx.modelRegistry.refresh({ force: true });
+          // A network refresh runs the binding check for the key it found
+          // (cloudRefreshModels → ensureCloudEndpointBound), so adopt it: the
+          // watch must not re-derive the same key on the next turn.
+          credentials.rebase();
           const failed = [...res.errors.values()].map((err: any) => err?.message || String(err));
           ctx.ui.notify(
             `Plan: ${planDefs.length} models. Cloud: ${cloudDefs.length} models.` +

@@ -21,12 +21,13 @@ const EXT_PATH = pathToFileURL(path.join(import.meta.dirname, "..", "extensions"
 
 const CHILD = `
 import fs from "node:fs";
+import path from "node:path";
 const dir = process.env.PI_CODING_AGENT_DIR;
 const providers = {}; const tools = {}; const commands = {}; const handlers = {};
-const sent = []; const notified = []; const statuses = [];
+const sent = []; const notified = []; const statuses = []; const registrations = {};
 const mod = await import(${JSON.stringify(EXT_PATH)});
 await mod.default({
-  registerProvider: (n, c) => { providers[n] = c; },
+  registerProvider: (n, c) => { providers[n] = c; registrations[n] = (registrations[n] ?? 0) + 1; },
   registerTool: (t) => { tools[t.name] = t; },
   registerCommand: (n, c) => { commands[n] = c; },
   on: (ev, h) => { (handlers[ev] ??= []).push(h); },
@@ -126,6 +127,87 @@ if (process.env.MODE === "info") {
     if (res?.message) rewritten = res.message.errorMessage;
   }
   process.stdout.write(JSON.stringify({ rewritten }));
+} else if (process.env.MODE === "credswap") {
+  // A mid-session /login: pi writes auth.json and fires no extension event, so
+  // everything derived from the previous key has to be re-derived by the watch.
+  // Offline by construction: the fixture's domain is non-routable and fetch is
+  // stubbed, so the only network-shaped thing here is the code under test.
+  // CATALOG_OK=1 makes the stub answer like a real endpoint, which is what the
+  // "the catalog follows the key" case needs.
+  globalThis.fetch = async (url) => {
+    if (process.env.CATALOG_OK !== "1") return { ok: false, status: 500, json: async () => ({}) };
+    if (String(url).includes("capabilities=IG")) {
+      return { ok: true, status: 200, json: async () => ({ output: { total: 1, models: [{ model: "qwen-image-plus", name: "Qwen Image Plus" }] } }) };
+    }
+    return {
+      ok: true, status: 200,
+      json: async () => ({
+        output: {
+          total: 1,
+          models: [{ model: "qwen3.8-max", name: "Qwen 3.8 Max", model_info: { context_window: 1048576, max_output_tokens: 32768 } }],
+        },
+      }),
+    };
+  };
+  const selects = [];
+  const ctx = {
+    signal: undefined,
+    model: { provider: "alibaba-cloud", id: "qwen3.7-plus", api: "openai-responses", contextWindow: 1048576 },
+    modelRegistry: {},
+    reload: async () => {},
+    ui: {
+      select: async () => selects.shift(),
+      confirm: async () => true,
+      input: async () => undefined,
+      notify: (message, type) => { notified.push({ message, type }); },
+      setStatus: () => {},
+    },
+  };
+  // What /alibaba → Status says about the warm engine, one line.
+  const warmingLine = async () => {
+    notified.length = 0; selects.length = 0; selects.push("Status");
+    await commands.alibaba.handler("", ctx);
+    const line = notified.map((n) => n.message).join("\\n").split("\\n").find((l) => l.includes("Warming:"));
+    return line ? line.replace(/\\s+/g, " ").trim() : null;
+  };
+  // One real Cloud request, as pi dispatches it: headers first, then payload.
+  const model = ctx.model;
+  const payload = { model: model.id, instructions: "You are pi.", input: [{ role: "user", content: "hi" }], stream: true, max_output_tokens: 8192 };
+  for (const h of handlers.before_provider_headers ?? []) {
+    await h({ headers: { authorization: "Bearer " + process.env.KEY_FIRST, "x-dashscope-session-cache": "enable" } }, { model });
+  }
+  for (const h of handlers.before_provider_request ?? []) await h({ payload }, { model });
+  // The turn completes: the engine learns the prompt size, without which it
+  // stays under its floor and never arms.
+  for (const h of handlers.message_end ?? []) {
+    await h({
+      message: {
+        role: "assistant", provider: "alibaba-cloud", model: model.id, stopReason: "stop", timestamp: Date.now(),
+        usage: { input: 150_000, output: 16, cacheRead: 0, cacheWrite: 0, totalTokens: 150_016, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      },
+    }, { model });
+  }
+  const armed = await warmingLine();
+
+  // /login writes the new key. No event, no reload — just the file.
+  fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "alibaba-cloud": { type: "api_key", key: process.env.KEY_SECOND } }));
+  // pi awaits turn_start before it dispatches the turn's request, which is what
+  // makes it the check point: the next request must already carry the new key's
+  // endpoint.
+  for (const h of handlers.turn_start ?? []) await h({ type: "turn_start", turnIndex: 0, timestamp: Date.now() }, ctx);
+  const settled = await warmingLine();
+  // The catalog refresh runs off the critical path; give it a bounded moment so
+  // the registration count is an observation, not a race.
+  const want = process.env.CATALOG_OK === "1" ? 3 : 2;
+  for (let i = 0; i < 200 && (registrations["alibaba-cloud"] ?? 0) < want; i++) await new Promise((r) => setTimeout(r, 10));
+  const cfg = JSON.parse(fs.readFileSync(path.join(dir, "alibaba-config.json"), "utf8"));
+  process.stdout.write(JSON.stringify({
+    armed, settled,
+    fingerprint: cfg.cloudKeyFingerprint ?? null,
+    registrations: registrations["alibaba-cloud"] ?? 0,
+    models: (providers["alibaba-cloud"].models || []).map((m) => m.id),
+    baseUrl: (providers["alibaba-cloud"].models || [])[0]?.baseUrl ?? null,
+  }));
 } else {
   const savePath = process.env.SAVE_PATH;
   let capturedContext = null; let capturedOptions = null;
@@ -196,11 +278,15 @@ function runChild(agentDir: string, mode: string, env: Record<string, string> = 
   });
 }
 
+// The fixture's Cloud key, and the one a mid-session /login replaces it with.
+const FIXTURE_KEY = "sk-fake-cloud-key";
+const SWAPPED_KEY = "sk-second-cloud-key";
+
 function makeFixture(config: Record<string, unknown>): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-alibaba-factory-"));
   const agentDir = path.join(root, "agent");
   fs.mkdirSync(agentDir, { recursive: true });
-  const key = "sk-fake-cloud-key";
+  const key = FIXTURE_KEY;
   fs.writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify({ "alibaba-cloud": { type: "api_key", key } }));
   fs.writeFileSync(path.join(agentDir, "alibaba-config.json"), JSON.stringify({
     // Non-routable domain + a matching fingerprint: no probe, no fetch.
@@ -294,6 +380,61 @@ describe("factory registration: mixed provider + tool exposure", () => {
     const config = JSON.parse(fs.readFileSync(path.join(dir, "alibaba-config.json"), "utf8"));
     assert.equal(config.alibabaToolsExposure, "off");
     assert.equal(config.cloudSidecarTools, undefined);
+  });
+});
+
+// ── A credential swapped mid-session ────────────────────────────────────
+// pi writes /login credentials itself and fires no event, so the extension
+// watches them (credential-watch.ts). Without that watch a swapped key left the
+// cards on the previous key's endpoint, the catalog on the previous account,
+// and the warm engine replaying the previous key's Authorization header —
+// until pi was restarted.
+describe("credential watch: a /login mid-session", () => {
+  const swap = (env: Record<string, string> = {}) => {
+    const dir = makeFixture({});
+    return runChild(dir, "credswap", {
+      KEY_FIRST: FIXTURE_KEY,
+      KEY_SECOND: SWAPPED_KEY,
+      ...env,
+    }).then((out) => JSON.parse(out) as {
+      armed: string; settled: string; fingerprint: string | null;
+      registrations: number; models: string[]; baseUrl: string | null;
+    });
+  };
+
+  it("moves the binding, drops the warm template, and re-registers the cards", async () => {
+    const out = await swap();
+
+    // Before the swap: one real request was captured and the engine is armed.
+    assert.match(out.armed ?? "", /^Warming: extension/, out.armed);
+    assert.match(out.armed, /next warm in/, "the captured request should have armed a refresh");
+
+    // After it: the engine refuses to replay a template captured under the
+    // replaced key, and says why in the one place a user looks.
+    assert.equal(out.settled, "Warming: extension (216s refresh, 240m horizon, ≥20,000 tokens) — idle (the Cloud credential changed)");
+
+    // The endpoint binding now belongs to the new key — the field that used to
+    // keep the previous one until the next boot.
+    assert.equal(out.fingerprint, cloudKeyFingerprint(SWAPPED_KEY));
+
+    // Re-registration is what moves the cards onto the derived endpoint.
+    assert.ok(out.registrations >= 2, `expected re-registration, saw ${out.registrations}`);
+    assert.equal(out.baseUrl, "https://127.0.0.1:9/compatible-mode/v1");
+  });
+
+  it("keeps the catalog in hand when the post-swap refresh cannot reach the endpoint", async () => {
+    const out = await swap();
+    assert.deepEqual(out.models, ["qwen3.7-plus", "qwen-image-plus", "z-image-turbo"]);
+    assert.equal(out.registrations, 2, "a fetch that learned nothing has nothing to re-register");
+  });
+
+  it("serves the new key's own catalog once the refresh lands", async () => {
+    const out = await swap({ CATALOG_OK: "1" });
+    assert.equal(out.registrations, 3);
+    // The authorized list belongs to the account, so it follows the key: the
+    // previous account's chat model is gone, the fetched one is registered.
+    assert.deepEqual(out.models, ["qwen3.8-max", "qwen-image-plus"]);
+    assert.equal(out.fingerprint, cloudKeyFingerprint(SWAPPED_KEY));
   });
 });
 

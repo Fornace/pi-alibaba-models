@@ -470,6 +470,13 @@ export interface WarmTemplate {
   at: number;
   /** Prefix head this request belongs to (see `contextId`), for telemetry. */
   ctx?: string;
+  /**
+   * Signature of the Cloud credential this request went out with (see
+   * credential-watch.ts). A replay sends `headers` verbatim, `authorization`
+   * included, so a template captured before a mid-session /login would keep
+   * spending the key the user just replaced — the engine refuses it instead.
+   */
+  cred?: string | null;
 }
 
 export interface WarmResult {
@@ -501,6 +508,13 @@ export interface WarmStatus {
 export interface CacheWarmerDeps {
   settings(): WarmSettings;
   logFile(): string;
+  /**
+   * The credential a replay must still match, signed the same way as
+   * `WarmTemplate.cred`. No dep at all means "this caller does not track
+   * credentials" and never vetoes; a dep that answers `null` means the
+   * credential is *gone*, which vetoes a signed template like any other change.
+   */
+  credential?(): string | null | undefined;
   /** Debug sink; `ctx.log` in the extension. */
   log?(line: string): void;
   fetch?(url: string, init: RequestInit): Promise<Response>;
@@ -581,6 +595,16 @@ export function createCacheWarmer(deps: CacheWarmerDeps): CacheWarmer {
     const t = template;
     const settings = deps.settings();
     if (settings.mode !== "extension") return;
+    // The captured headers carry the credential pi resolved for that request.
+    // If the process has since moved to another one — or dropped it — replaying
+    // would spend a key the user replaced, against an endpoint that may not
+    // accept it either. Drop the template instead of sending it.
+    const active = deps.credential ? deps.credential() : undefined;
+    if (t.cred && active !== undefined && t.cred !== active) {
+      template = undefined;
+      stopped = "the Cloud credential changed since the capture";
+      return;
+    }
     const url = warmUrl(t.baseUrl, t.api);
     const payload = buildWarmPayload(t.payload, t.api);
     if (!url || !payload) { stopped = "request cannot be replayed"; return; }
