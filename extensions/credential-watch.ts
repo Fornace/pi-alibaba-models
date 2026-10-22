@@ -2,7 +2,7 @@
 //
 // pi writes credentials from its own /login dialog and fires no extension event
 // for it. What a write does trigger is a recomposition plus a refresh with
-// `allowNetwork: false` (verified in 1.2.0 and 1.3.0:
+// `allowNetwork: false` (verified in 1.2.0, 1.3.0 and 1.4.0:
 // `ModelRuntime.synchronizeCredentialState`), and that refresh asks our
 // `refreshModels` for cards — which are built from the config as it stands. So
 // a key swapped mid-session leaves everything this extension derived from the

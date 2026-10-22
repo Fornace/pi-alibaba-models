@@ -287,3 +287,52 @@ that answer here (checked before a run and before a compaction, where being late
 `credentials_changed` event, or a network-allowed refresh after a successful login, would let
 extensions drop derived state instead of looking for it; until then the watch is the cheaper of the
 two mistakes.
+
+## New host surfaces worth adopting (pi 1.4.0)
+
+Verified 2026-10-22 against the installed 1.4.0 (`tsc --noEmit` clean, 302/302 tests, offline boot
+via `pi -ne -e <repo> --offline --list-models alibaba-cloud` → 103 Cloud cards). No live turn: the
+release changes no behaviour here and a Cloud request costs money.
+`dist/core/extensions/types.d.ts` is byte-identical to 1.3.0's and 1.2.0's (one sha1, `0f3314ac`,
+for all three) — no new event, no new field on the extension-facing model config — and nothing in
+the release breaks this extension. The items below are what 1.4.0 adds that we do not use.
+
+- **`compat` on classifier models, plus System One `imageInput` / `sendImageOptInHeader`.** 1.4.0
+  applies a provider's `compat` to its classifier models as well, and adds the two fields to
+  `core/model-config.d.ts` for proxies that serve someone else's classifiers. Nothing to adopt while
+  no classifier is registered — `ownedRows()` drops classifier rows and the Cloud provider declares
+  only `images: { [IMAGE_API]: … }`. It does change one line of the deferred **Classifier models on
+  the Cloud provider** item above: a DashScope classifier card could now carry `compat` (say
+  `thinkingFormat: "qwen"`, or `supportsUsageInStreaming`) on the same footing as its chat siblings,
+  instead of relying on the provider-level default. Still gated on the same live `logprobs`
+  experiment, which is not free.
+- **`models.classify()` accepts `images` in codemode** (Jev/Clef on typesafe, cloudflare-workers-ai,
+  OpenRouter). A codemode script sorting screenshots would use it; ours call `alibaba_tools` and
+  `alibaba_image`, and neither classifies. Recorded so the field is known-checked rather than
+  missed.
+- **Codemode worker admission is a queue, not a failure** — parallel scripts and in-process subagents
+  now wait instead of erroring, with `PI_CODEMODE_MAX_WORKERS` to size the pool. This *relaxes* the
+  1.3.0 constraint noted above: a script holding a worker for a whole `alibaba_tools` or
+  `alibaba_image` call no longer blocks a second script out of existence, it delays it. Our own
+  timeouts and retries are unchanged and still the right place for a hung DashScope call; the only
+  thing worth remembering is that a queue means "slow", not "broken", so a sidecar that times out
+  should not be read as a codemode failure.
+- **Summaries ignore `reserveTokens`** and use the model's output limit (#9512), which is why long
+  reasoning no longer fails a compaction. We call neither `generateSummary()` nor
+  `generateSummaryWithUsage()`. Relevant only as the neighbourhood of a claim we do make: compaction
+  still builds its options without `onPayload` (`createSummarizationOptions` → `completeSummarization`),
+  so a summary still never reaches `before_provider_request` and the warm engine still captures only
+  real loop requests. Re-read in 1.4.0.
+- **Attribution headers are stamped before `before_provider_headers`.** Not a surface to adopt but a
+  constraint on any future header logic: a handler can no longer observe-and-preserve OpenRouter,
+  NVIDIA NIM or OpenCode attribution, though returning `null` still deletes a header. Our handler
+  copies and never deletes, and `getAttributionHeaders()` returns `{}` for a Cloud target, so the
+  warm template captures the same headers it did. If this extension ever grows a header rewrite, it
+  must not assume it can see — or must re-add — an attribution header.
+- **No action on the rest.** The default-model moves (Copilot `gpt-6.1-sol`, NVIDIA
+  `nemotron-3.5-super-vl-120b-a12b`, Xiaomi `mimo-v2.6-pro` replacing `mimo-v2.5-pro`), Grok
+  4.3/4.5 `xhigh`, `MiniMax-M3.1-Flash` on `minimax`/`minimax-cn`, ChatGPT Business usage-limit
+  errors no longer retrying, Rex terminal support (OSC 8 / truecolor / inline images) and the
+  generated Models Configuration reference (`ModelsJsonSchemas`) are all host-side surfaces this
+  extension never touches. The `MiniMax/MiniMax-M3.1-Flash` in our own listing is the DashScope
+  catalog's, not pi's — a coincidence of naming, not a shared source.

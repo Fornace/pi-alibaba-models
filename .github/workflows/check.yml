@@ -7,7 +7,7 @@
 #
 # Отличие этой репы от восьми остальных в семействе (у них `check.yml` байт в
 # байт один и тот же, devDependencies пусты, а pi линкуется из глобальной
-# установки): хост здесь — настоящая `devDependencies` (`pi-coding-agent ^1.3.0`,
+# установки): хост здесь — настоящая `devDependencies` (`pi-coding-agent ^1.4.0`,
 # TypeScript 6.0.3, `package-lock.json` закоммичен), как в pi-volcengine и
 # pi-paratera. Поэтому две job'ы:
 #   pinned — `npm ci`, то есть ровно поддерживаемая конфигурация;

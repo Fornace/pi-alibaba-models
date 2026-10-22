@@ -2653,6 +2653,16 @@ export default async function (pi: ExtensionAPI) {
   // Headers of the request being dispatched. `before_provider_headers` fires
   // first (pi-ai resolves auth, then builds the payload), and the object pi
   // hands over is mutated in place, so it is copied.
+  //
+  // Since pi 1.4.0 the provider *attribution* headers are applied from pi-ai's
+  // client identity before this handler runs, so a handler no longer sees them
+  // arrive (returning `null` for a header still deletes it). None of that
+  // reaches this copy, and nothing here depends on their visibility: this
+  // handler only copies, never deletes or inspects a name, and
+  // `getAttributionHeaders()` — re-read in the installed 1.4.0 — returns `{}`
+  // unless the target is OpenRouter, NVIDIA NIM or OpenCode, while a Cloud
+  // request goes to its own Domain under `alibaba-cloud`. The warm template
+  // therefore captures the same header set it did before.
   let pendingHeaders: Record<string, string> | undefined;
 
   pi.on("before_provider_headers", (event, ctx) => {
@@ -2684,8 +2694,9 @@ export default async function (pi: ExtensionAPI) {
     // Captured verbatim so a warm replays a byte-identical prefix. Compaction
     // and branch summaries never arrive here: pi wires `onPayload`, which is
     // what emits this event, only through the agent loop, and builds summary
-    // options without it (re-verified in pi 1.1.0 and in 1.2.0, where
-    // compaction still passes the bare stream function). They *do* reach
+    // options without it (re-verified in pi 1.1.0, 1.2.0 and 1.4.0, where
+    // `createSummarizationOptions` still builds them bare and compaction still
+    // passes the plain stream function). They *do* reach
     // `before_provider_headers`, so `pendingHeaders` can briefly hold a
     // summary's headers — harmless, because nothing is captured without a
     // payload event and the next real request overwrites them first. pi's own
