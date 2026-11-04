@@ -709,8 +709,15 @@ export function thinkingConfigFor(id: string, api: string): ThinkingConfig | und
   }
   // Anthropic-compatible: pi derives the thinking budget from the level name,
   // so every level stays selectable and `--thinking off` serializes as
-  // `thinking: {type: "disabled"}` (see ANTHROPIC_ALL_LEVELS).
-  return { thinkingLevelMap: { ...ANTHROPIC_ALL_LEVELS }, compat: { thinkingFormat: "qwen" } };
+  // `thinking: {type: "disabled"}` (see ANTHROPIC_ALL_LEVELS). Families that
+  // cannot switch thinking off at all hide the level instead — MiniMax-M2.5
+  // answers `--thinking off` with `400 … The value of the enable_thinking
+  // parameter is restricted to True`, so pi clamps it up to a real effort
+  // (measured on the Coding Plan endpoint 2026-11-03).
+  return {
+    thinkingLevelMap: { ...ANTHROPIC_ALL_LEVELS, off: caps.completions.off ? "off" : null },
+    compat: { thinkingFormat: "qwen" },
+  };
 }
 
 // Cloud models the Responses endpoint cannot serve (measured 2026-09-22).

@@ -214,6 +214,17 @@ describe("thinkingConfigFor", () => {
     assert.equal(cfg?.compat.supportsReasoningEffort, undefined);
   });
 
+  it("hides `off` on the Anthropic path for families that cannot disable thinking", () => {
+    // MiniMax-M2.5 rejects `thinking: {type: "disabled"}` with
+    // `400 … The value of the enable_thinking parameter is restricted to True`.
+    // Its Completions row already has no `off`, so the Anthropic map inherits
+    // that and pi clamps `--thinking off` up to a real effort.
+    const mini = thinkingConfigFor("MiniMax-M2.5", "anthropic-messages");
+    assert.equal(mini?.thinkingLevelMap.off, null);
+    // Families that *can* switch off keep the sendable literal.
+    assert.equal(thinkingConfigFor("glm-5", "anthropic-messages")?.thinkingLevelMap.off, "off");
+  });
+
   it("hides the levels Chat Completions cannot express per family", () => {
     const glm53 = thinkingConfigFor("glm-5.3", "openai-completions");
     // Only low/high/max are distinct — the docs coerce medium to high and
