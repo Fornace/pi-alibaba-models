@@ -154,9 +154,14 @@ const removeLegacyCaches = () => {
 // offered when they carry an explicit key.
 //
 // Everything below was probed against the workspace endpoint on 2026-09-22:
-//   • the Anthropic path splits `maxTokens` into a thinking budget plus the
-//     answer, so each model's own catalog ceiling is used (never an
-//     id-based guess — the endpoint rejects anything larger).
+//   • the Anthropic path sends `maxTokens` as `max_tokens` and pi reserves a
+//     thinking slice of it (`budget_tokens`), so each model's own catalog
+//     ceiling is used (never an id-based guess — the endpoint rejects anything
+//     larger). Whether that slice actually comes out of the answer is a
+//     per-family property, measured 2026-11-03: answer-only for Qwen, GLM-5/5.1
+//     and MiniMax (the CoT is billed on top), shared for `glm-5.3` and
+//     `deepseek-v4*`. See docs/notes/2026-11-03-cloud-anthropic-max-tokens-
+//     semantics.md.
 //   • the OpenAI paths send `reasoning_effort` (some models also require
 //     `enable_thinking`), and each family accepts a different subset.
 
@@ -456,13 +461,18 @@ const inferContextWindow = (id: string, overrides?: Record<string, number>): num
 
 // Infer the maxTokens card value from the model id.
 //
-// pi's Anthropic path splits maxTokens into a thinking budget plus the answer
-// (maxTokens − thinkingBudget). The safe value is the catalog's own
-// `max_output_tokens`, which is per-model and already known to the endpoint
-// (qwen-plus = 32768, qwen3-coder-plus = 65536, qwen3-30b-a3b = 8192,
-// qwen3.8-max = 131072). Sending a larger number is rejected with
-// `Range of max_tokens should be [1, N]`, so the catalog value is never
-// exceeded. Models with no catalog row fall back to the conservative pair.
+// On the Anthropic path `maxTokens` becomes the request's `max_tokens`, and pi
+// reserves a thinking slice of it (`budget_tokens = min(level, maxTokens −
+// 1024)`). How much of the answer that slice costs depends on the family, not on
+// the shape (measured 2026-11-03, docs/notes/2026-11-03-cloud-anthropic-max-
+// tokens-semantics.md): Qwen, GLM-5/5.1 and MiniMax cap **the answer** and bill
+// the CoT on top, while `glm-5.3` and `deepseek-v4*` share one budget, so for
+// them a small card really does shrink the answer. The safe value under both
+// readings is the catalog's own `max_output_tokens`, which is per-model and
+// already known to the endpoint (qwen-plus = 32768, qwen3-coder-plus = 65536,
+// qwen3-30b-a3b = 8192, qwen3.8-max = 131072). Sending a larger number is
+// rejected with `Range of max_tokens should be [1, N]`, so the catalog value is
+// never exceeded. Models with no catalog row fall back to the conservative pair.
 export const ANTHROPIC_MAX_TOKENS = 131072;
 export const inferAnthropicMaxTokens = (id: string, catalogMax?: number): number => {
   if (typeof catalogMax === "number" && Number.isFinite(catalogMax) && catalogMax > 0) {
