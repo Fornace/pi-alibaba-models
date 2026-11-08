@@ -37,3 +37,28 @@ Publication preparation: npm registry currently1.1.0/gitHead839feb280c50678b1c3b
 v1.1.1 tag absent before release. Existing publish.yml runs install/typecheck/
 pack-check/publish using configured trusted publishing; no auth-policy change
 or manual npm publish. Version1.1.1 release status must be verified separately.
+
+## Published artifact and installed selection verified
+
+Publish34006595625 completed successfully, including actual Publish step at
+02:29:28UTC. npm registry returned version1.1.1 and exact gitHead
+fdb435bf2d5555409aad8ba65bd97b0e11d86cc3, integrity:
+sha512-vxYi9YH/zYLrD+ITZ15cUo/tZ9bXClaEpxUCqDwUudTfqkKqGyCV7HHm94dlh8JaXNGV36s20l9yDmKHlf7j6A==
+
+Installed that exact registry package with ignore-scripts into a new prefix:
+/Users/ffrappo/.pi/agent/package-releases/pi-alibaba-models/1.1.1
+Lock integrity matches registry. All three shipped extension files equal the
+corresponding git commit bytes. Actual staged extension refreshed plan17 and
+cloud97 models at1788661869943/1788661870862 without cache-failure warnings.
+
+Global package registration now selects that prefix's node_modules/
+pi-alibaba-models. The old shared npm1.1.0 tree was not replaced or removed.
+Full actual global+Mantice-workspace loader check:12extensions,0errors, exactly
+one Alibaba extension from1.1.1, zero catalog-failure warnings. Existing session
+processes were not restarted/reloaded; new registration is not in-memory uptake.
+
+Official npm install docs rechecked HTTP20004:30:25local before staging:
+https://docs.npmjs.com/cli/v12/commands/npm-install/
+Past30day official npm release-list check returned v11.19.1 and libnpmpack9.1.13
+published2026-08-26 (queried latest20 release records); this is not proof of
+the globally latest npm version. Installed workstation npm remains12.0.2.
