@@ -84,6 +84,10 @@ const inferContextWindow = (id: string, overrides?: Record<string, number>): num
   if (/minimax-?m2\.1/i.test(id)) return 204800;
   if (/minimax/i.test(id)) return 196608;
 
+  // Qwen4 family: 1M (spec is exactly 1,000,000, not 1 MiB).
+  // https://www.alibabacloud.com/help/en/model-studio/qwen4-max
+  if (/^qwen4/i.test(id)) return 1000000;
+
   // Qwen 3.7+: all 1M. Qwen 3.5/3.6: plus/flash = 1M, max/open-weight = 256K.
   if (/^qwen3\.([7-9]|\d{2,})\b/i.test(id)) return 1048576;
   if (/^qwen3\.[56]\b/i.test(id)) return /(plus|flash)/i.test(id) ? 1048576 : 262144;
