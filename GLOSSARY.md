@@ -11,6 +11,13 @@ DashScope sidecar tool. This glossary fixes the vocabulary the code, README and 
 The `alibaba-plan` provider: a Model Studio Coding Plan subscription reached with a pasted token.
 _Avoid_: subscription, coding plan, plan mode
 
+**Token Plan**:
+Alibaba's separate credits-billed subscription (Personal / Team), served from
+`token-plan.ap-southeast-1.maas.aliyuncs.com` and `token-plan.cn-beijing.maas.aliyuncs.com`. Its keys
+also start `sk-sp-` but are not interchangeable with Plan keys, and this package registers no Token Plan
+provider yet.
+_Avoid_: new coding plan, AI plan, credit plan
+
 **Cloud**:
 The `alibaba-cloud` provider: pay-per-token DashScope reached with an API key from `/login` or `$DASHSCOPE_API_KEY`.
 _Avoid_: DashScope (that is the host, not the provider), API mode, payg

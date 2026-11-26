@@ -190,8 +190,15 @@ const ANTHROPIC_ALL_LEVELS = levels({
   off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max",
 });
 
-const DEFAULT_PLAN_OPENAI = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
-const DEFAULT_PLAN_ANTHROPIC = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic";
+// Coding Plan hosts, per Alibaba's current documentation. The retired host
+// `token-plan.ap-southeast-1.maas.aliyuncs.com` now serves the separate,
+// credits-billed Token Plan, so an endpoint recorded by an older install is
+// moved onto the current host (see normalizePlanBaseUrls) instead of 401ing
+// forever.
+const DEFAULT_PLAN_OPENAI = "https://coding-intl.dashscope.aliyuncs.com/v1";
+const DEFAULT_PLAN_ANTHROPIC = "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic";
+const LEGACY_PLAN_OPENAI = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+const LEGACY_PLAN_ANTHROPIC = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic";
 const DEFAULT_CLOUD_DOMAIN = "dashscope-intl.aliyuncs.com";
 // Since 1.5.0 Responses is the default Cloud wire format (session-cache
 // economics, agent-native features, no Anthropic budget squeeze). An unset
@@ -804,18 +811,36 @@ async function fetchPlanModels(_force = false, credentials?: { access?: string; 
 }
 
 // ── Plan endpoint resolution ──────────────────────────────────────────
+/**
+ * Move a Plan base-URL pair recorded before the Coding Plan host change onto
+ * the current host. Exact legacy values only: a custom URL (including a
+ * deliberate Token Plan host) is returned untouched, and one legacy half never
+ * rewrites the other half of the pair.
+ */
+export function normalizePlanBaseUrls(
+  openai: string,
+  anthropic: string,
+): { openai: string; anthropic: string } {
+  return {
+    openai: openai === LEGACY_PLAN_OPENAI ? DEFAULT_PLAN_OPENAI : openai,
+    anthropic: anthropic === LEGACY_PLAN_ANTHROPIC ? DEFAULT_PLAN_ANTHROPIC : anthropic,
+  };
+}
+
 function resolvePlanEndpoints(credentials?: { access?: string; refresh?: string }): { openai: string; anthropic: string } {
   if (credentials?.refresh) {
     try {
       const parsed = JSON.parse(credentials.refresh);
-      if (parsed.openai && parsed.anthropic) return { openai: parsed.openai, anthropic: parsed.anthropic };
+      if (parsed.openai && parsed.anthropic) {
+        return normalizePlanBaseUrls(parsed.openai, parsed.anthropic);
+      }
     } catch {}
   }
   const cfg = loadConfig();
-  return {
-    openai: cfg.planOpenAI || DEFAULT_PLAN_OPENAI,
-    anthropic: cfg.planAnthropic || DEFAULT_PLAN_ANTHROPIC,
-  };
+  return normalizePlanBaseUrls(
+    cfg.planOpenAI || DEFAULT_PLAN_OPENAI,
+    cfg.planAnthropic || DEFAULT_PLAN_ANTHROPIC,
+  );
 }
 
 export function buildPlanModels(
@@ -2115,14 +2140,17 @@ function registerPlanProvider(pi: ExtensionAPI) {
           );
         }
         const cfg = loadConfig();
-        const openaiUrl = cfg.planOpenAI || DEFAULT_PLAN_OPENAI;
-        const anthropicUrl = cfg.planAnthropic || DEFAULT_PLAN_ANTHROPIC;
-        cfg.planOpenAI = openaiUrl;
-        cfg.planAnthropic = anthropicUrl;
+        // Resolve rather than read the fields directly: a base URL stored by
+        // an older install is normalized onto the current Coding Plan host,
+        // and an unset field is persisted as the current default rather than
+        // the retired one.
+        const ep = resolvePlanEndpoints();
+        cfg.planOpenAI = ep.openai;
+        cfg.planAnthropic = ep.anthropic;
         saveConfig(cfg);
         return {
           access: key,
-          refresh: JSON.stringify({ openai: openaiUrl, anthropic: anthropicUrl }),
+          refresh: JSON.stringify({ openai: ep.openai, anthropic: ep.anthropic }),
           expires: Date.now() + 365 * 86400_000,
         };
       },

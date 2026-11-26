@@ -14,7 +14,7 @@ The complete [`pi`](https://github.com/badlogic/pi-mono) extension for Alibaba's
 - **Vision Capable**: Image input automatically enabled for VL models, Qwen 3.8, Qwen 3.x Plus variants, and Kimi.
 - **Prompt-cache warming that treats latency as the point**: the extension replays your last request with a 16-token cap to keep DashScope's 5-minute cache block alive — on its own schedule, for hours, with retries — so a long pause does not turn the next turn into a 1–2 minute cold prefill. Tunable in `/alibaba → Cloud — Cache Warming`, with per-turn cache telemetry (`cached_tokens` **and** the `cache_creation_input_tokens` pi never sees).
 - **Honest catalog pricing**: input/output/cache-read/cache-write are parsed from the exact price rows (tiered models priced at the tier you actually send, peak vs off-peak resolved, thinking-mode rows understood) and declared in CNY or converted USD.
-- **Live Catalog**: Cloud prefers Alibaba's native `GET /api/v1/models` (real context windows, max output, capability tags, pricing) and falls back to compatible-mode `/models`. Plan still uses the live `/compatible-mode/v1/models` list. New models appear as Alibaba ships them — no extension update needed.
+- **Live Catalog**: Cloud prefers Alibaba's native `GET /api/v1/models` (real context windows, max output, capability tags, pricing) and falls back to compatible-mode `/models`. Plan discovers its list from `GET {planOpenAI}/models` (currently the six Coding Plan models). New models appear as Alibaba ships them — no extension update needed.
 
 ## How to Use (Quickstart)
 
@@ -22,7 +22,7 @@ The complete [`pi`](https://github.com/badlogic/pi-mono) extension for Alibaba's
 2. **Restart** `pi` to load the extension.
 3. Type `/login` in your pi chat input.
 4. Select your provider based on your account type:
-   - Choose **Plans > Alibaba Model Studio Coding Plan** if you have a subscription (your token likely starts with `sk-sp-` or `sk-tok-`).
+   - Choose **Plans > Alibaba Model Studio Coding Plan** if you have a subscription (your token likely starts with `sk-sp-` or `sk-tok-`). This is the legacy **Coding Plan**; a newer **Token Plan** key also starts with `sk-sp-` but belongs to a different product and is not accepted here.
    - Choose **Use an API key > Alibaba Cloud (API Key)** if you use the pay-as-you-go DashScope service (your token likely starts with `sk-`).
 5. Paste your token when prompted.
 6. Open the model picker, select a model (e.g., `Qwen 3.8 Max`, `Qwen 3.7 Plus`, or `DeepSeek V4 Pro`), and start chatting!
@@ -82,9 +82,13 @@ Plan is registered as an `oauth` provider (paste token in `/login`). Cloud is re
 
 ### Endpoints
 
-**Plan (default Singapore / Global):**
-- Anthropic-compat: `https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic` (pi appends `/v1/messages`)
-- OpenAI-compat:    `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`
+**Plan — Coding Plan (default International / Singapore):**
+- OpenAI-compat:    `https://coding-intl.dashscope.aliyuncs.com/v1` (also answers `/models`)
+- Anthropic-compat: `https://coding-intl.dashscope.aliyuncs.com/apps/anthropic` (pi appends `/v1/messages`)
+
+**Plan — Coding Plan (China):** the same two paths on `https://coding.dashscope.aliyuncs.com`.
+
+> Older releases defaulted Plan to `token-plan.ap-southeast-1.maas.aliyuncs.com`, which Alibaba has since reassigned to the separate **Token Plan** product. A base URL recorded by such an install is moved onto `coding-intl` automatically; `/alibaba → Plan — Change Endpoints` overrides either URL explicitly.
 
 **Cloud (default International):**
 - Anthropic-compat: `https://dashscope-intl.aliyuncs.com/apps/anthropic`
@@ -96,14 +100,18 @@ Plan is registered as an `oauth` provider (paste token in `/login`). Cloud is re
 
 | Prefix      | Provider       | Where to obtain                                                   |
 |-------------|----------------|-------------------------------------------------------------------|
-| `sk-sp-`    | `alibaba-plan` | Model Studio Coding Plan console — Singapore / Global             |
+| `sk-sp-`    | `alibaba-plan` | Model Studio **Coding Plan** console — International / China      |
 | `sk-tok-`   | `alibaba-plan` | Model Studio Coding Plan console — alternate token format         |
+| `sk-sp-`    | *(unsupported)*| Model Studio **Token Plan** console (Personal / Team)             |
 | `sk-`(other)| `alibaba-cloud`| DashScope API Keys console (per-token billing)                    |
 
 Consoles:
 - International / Singapore Coding Plan: <https://modelstudio-intl.console.alibabacloud.com/>
 - China Coding Plan:                     <https://bailian.console.aliyun.com/>
+- Token Plan (Personal / Team):          <https://www.alibabacloud.com/help/en/model-studio/token-plan-overview>
 - DashScope (per-token):                 <https://dashscope.console.aliyun.com/> or <https://dashscope-intl.console.aliyun.com/>
+
+> **Coding Plan vs Token Plan.** Both are subscriptions and both keys start with `sk-sp-`, but they are separate products with separate keys and base URLs; a key from one is rejected by the other. This extension registers the **Coding Plan** (`coding-intl` / `coding.dashscope`). The newer credits-billed **Token Plan** (`token-plan.ap-southeast-1.maas.aliyuncs.com`, China `token-plan.cn-beijing.maas.aliyuncs.com`) is not registered yet — pi's built-in `qwen-token-plan` / `qwen-token-plan-cn` providers cover it if you have such a key.
 
 The login flow validates the prefix and offers to redirect you to the correct provider if you paste the wrong type.
 
@@ -111,12 +119,12 @@ The login flow validates the prefix and offers to redirect you to the correct pr
 
 | Region                | Plan host                                      | Cloud host                                     |
 |-----------------------|------------------------------------------------|------------------------------------------------|
-| International         | `token-plan.ap-southeast-1.maas.aliyuncs.com`  | `dashscope-intl.aliyuncs.com`                  |
-| China                 | (region-specific host, paste via "Custom")     | `dashscope.aliyuncs.com`                       |
+| International         | `coding-intl.dashscope.aliyuncs.com`            | `dashscope-intl.aliyuncs.com`                  |
+| China                 | `coding.dashscope.aliyuncs.com`                 | `dashscope.aliyuncs.com`                       |
 | US (Virginia)         | —                                              | `dashscope-us.aliyuncs.com`                    |
 | Hong Kong             | —                                              | `cn-hongkong.dashscope.aliyuncs.com`           |
-| Beijing (workspace)   | `{WorkspaceId}.cn-beijing.maas.aliyuncs.com`   | `{WorkspaceId}.cn-beijing.maas.aliyuncs.com`   |
-| Singapore (workspace) | `{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com` | `{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com` |
+| Beijing (workspace)   | —                                              | `{WorkspaceId}.cn-beijing.maas.aliyuncs.com`   |
+| Singapore (workspace) | —                                              | `{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com` |
 | Japan (Tokyo)         | —                                              | `{WorkspaceId}.ap-northeast-1.maas.aliyuncs.com` |
 | Germany (Frankfurt)   | —                                              | `{WorkspaceId}.eu-central-1.maas.aliyuncs.com` |
 | US (workspace)        | —                                              | `{WorkspaceId}.us-east-1.maas.aliyuncs.com`    |
@@ -274,11 +282,11 @@ that share a byte-identical prefix share the block. Subagents could inherit thei
 same way — that needs pi-subagents to keep the forked prefix identical, and is tracked in
 `docs/TODO.md` (P2-I).
 
-## Studio plan models — dynamic source
+## Studio plan models — live discovery
 
-The plan model list is fetched from the canonical Qwen Code template:
+The plan model list comes from the Plan endpoint itself: `GET {planOpenAI}/models` with `Authorization: Bearer <token>` — the same discovery call Qwen Code makes — filtered to chat-capable ids and derived into cards. On the current Coding Plan that is six models: `qwen3.5-plus`, `qwen3.6-plus`, `qwen3.7-plus`, `kimi-k2.5`, `glm-5`, `MiniMax-M2.5`, matching Alibaba's [supported-models list](https://www.alibabacloud.com/help/en/model-studio/coding-plan) ("Models not listed above are not supported"). New models appear as Alibaba ships them — `/alibaba → Refresh model lists` forces a refetch.
 
-<https://github.com/QwenLM/qwen-code/blob/main/packages/cli/src/constants/codingPlan.ts>
+This is the **Coding Plan**, not the newer **AI Token Plan**. The landing page promising `qwen3.8-max` / `qwen4-max` / `deepseek-v4.1-flash` / `glm-5.2` describes the credits-billed Token Plan: another product, another key and another host (`token-plan.ap-southeast-1.maas.aliyuncs.com`, China `token-plan.cn-beijing.maas.aliyuncs.com`). Its keys also start with `sk-sp-` but are rejected by the Coding Plan hosts, and vice versa. No Token Plan provider is registered here yet; pi's built-in `qwen-token-plan` / `qwen-token-plan-cn` cover it if you hold such a key. The older README pointed this list at Qwen Code's `codingPlan.ts`; that file has since moved to `packages/core/src/providers/presets/alibaba-coding-plan.ts` and its four extra ids (`qwen3-coder-plus`, `qwen3-coder-next`, `qwen3-max-2026-01-23`, `glm-4.7`) are rejected by the live endpoint, so the endpoint stays the source of truth.
 
 Model catalogs use the **"plan C" hybrid**: a private versioned snapshot (`alibaba-models.cache.json`) seeds provider registration at boot — zero network, so `pi --list-models` and `enabledModels` validation see real ids at once — while `refreshModels` additionally serves and publishes pi's own models store as a bonus channel (pi's legacy provider form does not persist returns on its own). A **missing bundle force-refreshes at startup** (first run, fresh agent dir, right after `Reset all`) instead of booting an empty catalog. Neither source is treated as proof of freshness: a shared 10-minute timestamp in `alibaba-config.json` governs that, and an `alibaba-catalog.lock` lockfile serializes fetchers across instances. A failed fetch keeps the previous list (and, with none, registers an empty list rather than crashing). `/alibaba → Refresh model lists` forces a refresh through `ctx.modelRegistry.refresh({force: true})`.
 
