@@ -174,7 +174,10 @@ function buildPlanModels(defs: PlanModelDef[], openaiUrl: string, anthropicUrl: 
     const useOpenAI = !!m.openaiOnly || /deepseek/i.test(m.id);
     return {
       id: m.id, name: m.name, reasoning: m.reasoning, input: m.input,
-      contextWindow: m.contextWindow, maxTokens: m.maxTokens, compat: m.compat,
+      contextWindow: m.contextWindow, maxTokens: m.maxTokens,
+      // DashScope compatible-mode endpoints (DeepSeek etc.) reject role:"developer";
+      // pin the system role so pi doesn't upgrade it for reasoning models.
+      compat: useOpenAI ? { ...m.compat, supportsDeveloperRole: false } : m.compat,
       thinkingLevelMap: m.reasoning ? { off: null } : undefined,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       baseUrl: useOpenAI ? openaiUrl : anthropicUrl,
@@ -228,6 +231,8 @@ function buildCloudModels(models: ProviderModelConfig[], domain: string, fmt: st
     return {
       ...m,
       thinkingLevelMap: m.reasoning ? { off: null } : undefined,
+      // DashScope compatible-mode endpoints (DeepSeek etc.) reject role:"developer".
+      compat: useOpenAI ? { ...m.compat, supportsDeveloperRole: false } : m.compat,
       baseUrl: useOpenAI ? `https://${domain}/compatible-mode/v1` : `https://${domain}/apps/anthropic`,
       api: (useOpenAI ? "openai-completions" : "anthropic-messages") as "anthropic-messages" | "openai-completions",
     };
